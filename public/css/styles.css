@@ -1,0 +1,36 @@
+:root {
+  --bg: transparent;
+  --panel: #0b1220;
+  --accent: #16a34a;
+  --muted: #94a3b8;
+  --card: #0b1220;
+  --text: #e6eef6;
+}
+
+html,body,#app { height: 100%; margin: 0; font-family: Inter, system-ui, "Segoe UI", Roboto, sans-serif; background: linear-gradient(180deg,#071022 0%, #071826 100%); color: var(--text); }
+
+.topbar { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; gap:12px; border-bottom: 1px solid rgba(255,255,255,0.03); background: rgba(2,6,12,0.2); }
+.topbar h1 { margin:0; font-size:14px; }
+.meta { font-size:12px; color:var(--muted); }
+
+.row { display:flex; gap:12px; padding:8px; height: calc(100% - 110px); box-sizing:border-box; }
+.leftpanel { width:340px; overflow:auto; }
+.left-tabs { display:flex; gap:8px; padding:8px 4px; }
+.left-tabs .tab-btn { flex:1; background: rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.02); padding:8px 6px; border-radius:6px; color:var(--text); cursor:pointer; }
+.left-tabs .tab-btn.active { background: #0ea5a4; color: #021; border-color: rgba(255,255,255,0.06); }
+
+.panel { background:rgba(255,255,255,0.02); padding:12px; border-radius:8px; margin-bottom:12px; }
+.panel h3 { margin:0 0 8px 0; font-size:14px; }
+
+.canvaswrap { flex:1; display:flex; align-items:stretch; }
+.stage { flex:1; display:flex; align-items:center; justify-content:center; background: rgba(255,255,255,0.01); border-radius:8px; padding:12px; position:relative; overflow:hidden; }
+#editorViewport { background: linear-gradient(180deg,#071022 0%, #071826 100%); border-radius:6px; overflow:hidden; width:100%; height:100%; position:relative; }
+canvas { background: transparent; width:100%; height:100%; display:block; border: 1px dashed rgba(255,255,255,0.03); position:absolute; left:0; top:0; }
+
+.footer { padding:8px 12px; color:var(--muted); font-size:13px; }
+.small { font-size:13px; color:var(--muted); }
+
+.controls button, .panel button { margin-top:8px; background:var(--accent); color:#052018; border:none; padding:6px 8px; border-radius:6px; cursor:pointer; }
+.controls button:hover, .panel button:hover { opacity:0.95; }
+button.active { background: #0ea5a4; color: #021; }
+.lib-item button { background: rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.03); color:var(--text); padding:4px 6px; border-radius:4px; cursor:pointer; }

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Telestrator — Viewer</title>
+  <style>
+    html,body { margin:0; padding:0; background:transparent; overflow:hidden; }
+    #viewerContainer { position:relative; width:1920px; height:1080px; background:transparent; }
+    #viewerCanvas { position:absolute; left:0; top:0; z-index:1; }
+    #viewerImageLayer { position:absolute; left:0; top:0; z-index:2; pointer-events:none; }
+    #audioUnlock { position:absolute; right:12px; top:12px; z-index:10; background:rgba(0,0,0,0.6); color:#fff; padding:6px 8px; border-radius:6px; display:none; }
+  </style>
+</head>
+<body>
+  <div id="viewerContainer">
+    <canvas id="viewerCanvas"></canvas>
+    <div id="viewerImageLayer" aria-hidden="true"></div>
+    <div id="audioUnlock"><button id="btnEnableAudio">Habilitar audio</button></div>
+  </div>
+  <script type="module" src="/js/viewer.js"></script>
+</body>
+</html>
