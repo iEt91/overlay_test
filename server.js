@@ -2,136 +2,979 @@
 // Servidor con WebSocket básico para broadcast entre editors y viewers.
 // Estado en memoria para MVP (ahora con biblioteca de assets).
 
+require('dotenv').config();
+
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const cors = require('cors');
 const http = require('http');
+const session = require('express-session');
+const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID;
+const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
+const TWITCH_REDIRECT_URI = process.env.TWITCH_REDIRECT_URI || `http://localhost:${PORT}/auth/twitch/callback`;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
+const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET?.trim();
 
-// Carpeta de uploads dentro de public
+// La clave de sesión debe existir únicamente en .env. Nunca se envía al navegador.
+const SESSION_SECRET = process.env.SESSION_SECRET;
+const isProduction = process.env.NODE_ENV === 'production';
+const SESSION_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
+const supabaseAdmin = SUPABASE_URL && SUPABASE_SECRET_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+  })
+  : null;
+
+function sessionExpiry(sessionData) {
+  const expires = sessionData?.cookie?.expires ? new Date(sessionData.cookie.expires) : null;
+  return expires && !Number.isNaN(expires.getTime())
+    ? expires.toISOString()
+    : new Date(Date.now() + SESSION_MAX_AGE_MS).toISOString();
+}
+
+// La sesión del editor no queda en la memoria del proceso. Así sobrevive a un
+// reinicio o redeploy del servidor sin guardar tokens de Twitch.
+class SupabaseSessionStore extends session.Store {
+  constructor(client) {
+    super();
+    this.client = client;
+  }
+
+  get(sid, callback) {
+    this.client.from('app_sessions').select('session, expires_at').eq('sid', sid).maybeSingle()
+      .then(({ data, error }) => {
+        if (error) return callback(error);
+        if (!data || new Date(data.expires_at).getTime() <= Date.now()) {
+          if (data) this.destroy(sid, () => {});
+          return callback(null, null);
+        }
+        callback(null, data.session);
+      })
+      .catch(callback);
+  }
+
+  set(sid, sessionData, callback = () => {}) {
+    this.client.from('app_sessions').upsert({
+      sid,
+      session: sessionData,
+      expires_at: sessionExpiry(sessionData),
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'sid' })
+      .then(({ error }) => callback(error || null))
+      .catch(callback);
+  }
+
+  touch(sid, sessionData, callback = () => {}) {
+    this.set(sid, sessionData, callback);
+  }
+
+  destroy(sid, callback = () => {}) {
+    this.client.from('app_sessions').delete().eq('sid', sid)
+      .then(({ error }) => callback(error || null))
+      .catch(callback);
+  }
+}
+
+// Las subidas locales se conservan como respaldo durante la transición. Al
+// configurar SUPABASE_STORAGE_BUCKET, los archivos nuevos pasan a Storage.
 const UPLOAD_DIR = path.join(__dirname, 'public', 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const useSupabaseStorage = Boolean(supabaseAdmin && SUPABASE_STORAGE_BUCKET);
 
-// Multer config (guardamos en public/uploads)
-const storage = multer.diskStorage({
+// Las subidas se publican para que el Viewer pueda usarlas, por lo que se
+// aceptan únicamente los formatos que realmente utiliza el editor.
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const UPLOAD_RULES = {
+  image: {
+    label: 'imagen',
+    extensions: new Set(['.jpg', '.jpeg', '.jfif', '.png', '.gif', '.webp']),
+    mimeTypes: new Set(['image/jpeg', 'image/pjpeg', 'image/png', 'image/gif', 'image/webp'])
+  },
+  audio: {
+    label: 'audio',
+    extensions: new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.webm']),
+    mimeTypes: new Set([
+      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/ogg', 'audio/mp4',
+      'audio/x-m4a', 'audio/aac', 'audio/x-aac', 'audio/webm'
+    ])
+  }
+};
+
+const localUploadStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_DIR),
   filename: (req, file, cb) => {
-    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    const clean = file.originalname.replace(/\s+/g, '-').slice(0, 120);
-    cb(null, `${unique}-${clean}`);
+    // No conservamos el nombre que llega desde el navegador para no publicar
+    // nombres arbitrarios. La extensión fue validada antes por Multer.
+    cb(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase()}`);
   }
 });
-const upload = multer({ storage });
+const uploadStorage = useSupabaseStorage ? multer.memoryStorage() : localUploadStorage;
+
+function createUpload(kind) {
+  const rules = UPLOAD_RULES[kind];
+  return multer({
+    storage: uploadStorage,
+    limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 },
+    fileFilter: (req, file, cb) => {
+      const extension = path.extname(file.originalname).toLowerCase();
+      if (!rules.extensions.has(extension) || !rules.mimeTypes.has(file.mimetype)) {
+        return cb(new Error(`Solo se permiten archivos de ${rules.label} compatibles.`));
+      }
+      cb(null, true);
+    }
+  });
+}
+
+const imageUpload = createUpload('image');
+const audioUpload = createUpload('audio');
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.set('trust proxy', 1);
 
-// Servir carpeta public
-app.use(express.static(path.join(__dirname, 'public')));
+// Render consulta esta ruta para confirmar que el proceso Node sigue vivo.
+// No expone datos de usuarios ni requiere sesión.
+app.get('/health', (_req, res) => res.status(200).json({ ok: true }));
 
-// Estado en memoria
-let STATE = {
-  strokes: [],    // strokes completos (para snapshot)
-  images: [],     // imágenes actualmente en canvas: { id, url, x, y, width, height }
-  texts: [],
-  timers: [],
-  audio: { current: null, playlist: [], slots: {} },
-  assets: { images: [], audio: [], fonts: [] }, // biblioteca de assets del proyecto
-  viewport: { x: 0, y: 0, width: 1920, height: 1080, scale: 1 }, // safe zone por defecto 1920x1080
-  volume: 1,
-  updatedAt: Date.now()
-};
-
-// GET /state -> devuelve estado actual + timestamp del servidor
-app.get('/state', (req, res) => {
-  res.json({
-    serverTime: Date.now(),
-    state: STATE
-  });
+const sessionMiddleware = session({
+  name: 'tango.sid',
+  secret: SESSION_SECRET || 'development-only-change-me-before-launch',
+  store: supabaseAdmin ? new SupabaseSessionStore(supabaseAdmin) : undefined,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: isProduction,
+    maxAge: SESSION_MAX_AGE_MS
+  }
 });
+app.use(sessionMiddleware);
 
-// POST /state -> reemplaza estado completo (compatibilidad)
-app.post('/state', (req, res) => {
-  const incoming = req.body;
-  if (!incoming) return res.status(400).json({ error: 'No body' });
+function twitchIsConfigured() {
+  return Boolean(TWITCH_CLIENT_ID && TWITCH_CLIENT_SECRET && SESSION_SECRET && supabaseAdmin);
+}
 
-  STATE = {
-    strokes: Array.isArray(incoming.strokes) ? incoming.strokes : STATE.strokes,
-    images: Array.isArray(incoming.images) ? incoming.images : STATE.images,
-    texts: Array.isArray(incoming.texts) ? incoming.texts : STATE.texts,
-    timers: Array.isArray(incoming.timers) ? incoming.timers : STATE.timers,
-    audio: incoming.audio || STATE.audio,
-    assets: incoming.assets || STATE.assets,
-    viewport: incoming.viewport || STATE.viewport,
-    volume: typeof incoming.volume === 'number' ? incoming.volume : STATE.volume,
-    updatedAt: Date.now()
-  };
+function twitchConfigurationError(res) {
+  return res.status(503).send('Falta configurar Twitch. Revisá el archivo .env local.');
+}
 
-  // Notify all WS clients about new snapshot
-  broadcastWS({ type: 'snapshot', state: STATE });
-
-  res.json({ ok: true, serverTime: STATE.updatedAt });
-});
-
-// POST /upload -> sube imágenes/audio, devuelve URL pública
-app.post('/upload', upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file' });
-  const publicUrl = `/uploads/${req.file.filename}`;
-  res.json({ url: publicUrl });
-});
-
-// Endpoint simple para reset (útil en pruebas)
-app.post('/reset', (req, res) => {
-  STATE = {
+function emptyScene() {
+  return {
     strokes: [],
     images: [],
     texts: [],
     timers: [],
     audio: { current: null, playlist: [], slots: {} },
-    assets: { images: [], audio: [], fonts: [] },
+    assets: { images: [], audio: [] },
     viewport: { x: 0, y: 0, width: 1920, height: 1080, scale: 1 },
     volume: 1,
     updatedAt: Date.now()
   };
-  broadcastWS({ type: 'snapshot', state: STATE });
-  res.json({ ok: true });
+}
+
+function normalizeScene(incoming, fallback = emptyScene()) {
+  const value = incoming && typeof incoming === 'object' ? incoming : {};
+  return {
+    strokes: Array.isArray(value.strokes) ? value.strokes : fallback.strokes,
+    images: Array.isArray(value.images) ? value.images : fallback.images,
+    texts: Array.isArray(value.texts) ? value.texts : fallback.texts,
+    timers: Array.isArray(value.timers) ? value.timers : fallback.timers,
+    audio: value.audio && typeof value.audio === 'object' ? value.audio : fallback.audio,
+    assets: value.assets && typeof value.assets === 'object' ? value.assets : fallback.assets,
+    viewport: value.viewport && typeof value.viewport === 'object' ? value.viewport : fallback.viewport,
+    volume: typeof value.volume === 'number' ? Math.max(0, Math.min(1, value.volume)) : fallback.volume,
+    updatedAt: Date.now()
+  };
+}
+
+const projectStateCache = new Map();
+const pendingSceneSaves = new Map();
+const pendingAuditUpdates = new Map();
+
+function hashOpaqueToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function databaseError(result, message) {
+  if (result && result.error) {
+    console.error(message, result.error.message);
+    throw new Error(message);
+  }
+  return result && result.data;
+}
+
+async function upsertTwitchUser(user) {
+  const result = await supabaseAdmin.from('twitch_users').upsert({
+    twitch_id: user.id,
+    login: user.login,
+    display_name: user.display_name,
+    profile_image_url: user.profile_image_url || null
+  }, { onConflict: 'twitch_id' });
+  databaseError(result, 'No se pudo guardar la cuenta de Twitch.');
+}
+
+async function ensureOwnerProject(user) {
+  await upsertTwitchUser(user);
+  const existing = await supabaseAdmin.from('projects')
+    .select('*')
+    .eq('owner_twitch_id', user.id)
+    .maybeSingle();
+  const project = databaseError(existing, 'No se pudo buscar el proyecto.');
+  if (project) return { project, role: 'owner', viewerToken: null };
+
+  const viewerToken = crypto.randomBytes(32).toString('base64url');
+  const created = await supabaseAdmin.from('projects').insert({
+    owner_twitch_id: user.id,
+    twitch_channel_id: user.id,
+    twitch_channel_login: user.login,
+    viewer_token_hash: hashOpaqueToken(viewerToken),
+    trial_ends_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+  }).select('*').single();
+  const newProject = databaseError(created, 'No se pudo crear el proyecto de Tango GG.');
+
+  const membership = await supabaseAdmin.from('project_members').insert({
+    project_id: newProject.id,
+    member_twitch_id: user.id,
+    role: 'owner',
+    joined_at: new Date().toISOString()
+  });
+  databaseError(membership, 'No se pudo crear el rol de streamer.');
+
+  const scene = await supabaseAdmin.from('project_scenes').insert({
+    project_id: newProject.id,
+    state: emptyScene(),
+    updated_by_twitch_id: user.id
+  });
+  databaseError(scene, 'No se pudo crear la escena inicial.');
+
+  await recordAudit(newProject.id, user.id, 'project.created');
+  return { project: newProject, role: 'owner', viewerToken };
+}
+
+async function acceptProjectInvite(token, user) {
+  await upsertTwitchUser(user);
+  const inviteResult = await supabaseAdmin.from('project_invites')
+    .select('id, project_id, expires_at, accepted_by_twitch_id, accepted_at')
+    .eq('token_hash', hashOpaqueToken(token))
+    .is('revoked_at', null)
+    .maybeSingle();
+  const invite = databaseError(inviteResult, 'No se pudo validar la invitación.');
+  if (!invite || new Date(invite.expires_at) <= new Date()) throw new Error('La invitación ya no es válida.');
+  if (invite.accepted_by_twitch_id && invite.accepted_by_twitch_id !== user.id) {
+    throw new Error('Esta invitación ya fue utilizada por otra cuenta de Twitch.');
+  }
+
+  const existingResult = await supabaseAdmin.from('project_members')
+    .select('role, active')
+    .eq('project_id', invite.project_id)
+    .eq('member_twitch_id', user.id)
+    .maybeSingle();
+  const existing = databaseError(existingResult, 'No se pudo validar la membresía.');
+  if (!existing) {
+    const memberResult = await supabaseAdmin.from('project_members').insert({
+      project_id: invite.project_id,
+      member_twitch_id: user.id,
+      role: 'editor',
+      joined_at: new Date().toISOString()
+    });
+    databaseError(memberResult, 'No se pudo añadir el invitado.');
+  } else if (!existing.active) {
+    const memberResult = await supabaseAdmin.from('project_members').update({ active: true, joined_at: new Date().toISOString() })
+      .eq('project_id', invite.project_id)
+      .eq('member_twitch_id', user.id);
+    databaseError(memberResult, 'No se pudo reactivar el invitado.');
+  }
+
+  if (!invite.accepted_at) {
+    const accepted = await supabaseAdmin.from('project_invites').update({
+      accepted_by_twitch_id: user.id,
+      accepted_at: new Date().toISOString()
+    }).eq('id', invite.id);
+    databaseError(accepted, 'No se pudo completar la invitación.');
+    await recordAudit(invite.project_id, user.id, 'member.invite_accepted');
+  }
+  return { project: { id: invite.project_id }, role: existing ? existing.role : 'editor', viewerToken: null };
+}
+
+async function getActiveMembership(projectId, twitchId) {
+  const result = await supabaseAdmin.from('project_members')
+    .select('role, active')
+    .eq('project_id', projectId)
+    .eq('member_twitch_id', twitchId)
+    .eq('active', true)
+    .maybeSingle();
+  return databaseError(result, 'No se pudo validar el acceso al proyecto.');
+}
+
+async function loadProjectScene(projectId) {
+  if (projectStateCache.has(projectId)) return projectStateCache.get(projectId);
+  const result = await supabaseAdmin.from('project_scenes')
+    .select('state')
+    .eq('project_id', projectId)
+    .single();
+  const scene = databaseError(result, 'No se pudo cargar la escena.');
+  const state = normalizeScene(scene.state);
+  projectStateCache.set(projectId, state);
+  return state;
+}
+
+async function saveProjectScene(projectId, actorTwitchId) {
+  const state = projectStateCache.get(projectId);
+  if (!state) return;
+  const result = await supabaseAdmin.from('project_scenes').update({
+    state: normalizeScene(state),
+    updated_by_twitch_id: actorTwitchId || null
+  }).eq('project_id', projectId);
+  databaseError(result, 'No se pudo guardar la escena.');
+}
+
+function scheduleSceneSave(projectId, actorTwitchId) {
+  const pending = pendingSceneSaves.get(projectId);
+  if (pending) {
+    pending.actorTwitchId = actorTwitchId || pending.actorTwitchId;
+    return;
+  }
+  const entry = { actorTwitchId, timer: null };
+  entry.timer = setTimeout(async () => {
+    pendingSceneSaves.delete(projectId);
+    try { await saveProjectScene(projectId, entry.actorTwitchId); }
+    catch (error) { console.error('Autosave de escena falló:', error.message); }
+  }, 60_000);
+  pendingSceneSaves.set(projectId, entry);
+}
+
+async function recordAudit(projectId, actorTwitchId, action, entityType = null, entityId = null, metadata = {}) {
+  const result = await supabaseAdmin.from('audit_events').insert({
+    project_id: projectId,
+    actor_twitch_id: actorTwitchId || null,
+    action,
+    entity_type: entityType,
+    entity_id: entityId,
+    metadata
+  });
+  databaseError(result, 'No se pudo registrar la acción.');
+}
+
+function scheduleAuditUpdate(projectId, actorTwitchId, action, entityId = null) {
+  const key = `${projectId}:${actorTwitchId}:${action}:${entityId || ''}`;
+  clearTimeout(pendingAuditUpdates.get(key));
+  pendingAuditUpdates.set(key, setTimeout(() => {
+    pendingAuditUpdates.delete(key);
+    recordAudit(projectId, actorTwitchId, action, null, entityId).catch(() => {});
+  }, 1200));
+}
+
+async function requireEditorApi(req, res, next) {
+  if (!req.session.user || !req.session.projectId) return res.status(401).json({ error: 'Iniciá sesión con Twitch.' });
+  try {
+    const membership = await getActiveMembership(req.session.projectId, req.session.user.id);
+    if (!membership) return res.status(403).json({ error: 'Ya no tenés acceso a este proyecto.' });
+    req.projectAccess = { projectId: req.session.projectId, role: membership.role };
+    next();
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo validar el acceso al proyecto.' });
+  }
+}
+
+async function requireOwnerApi(req, res, next) {
+  await requireEditorApi(req, res, () => {
+    if (req.projectAccess.role !== 'owner') return res.status(403).json({ error: 'Solo el streamer puede hacer esta acción.' });
+    next();
+  });
+}
+
+async function requireEditorPage(req, res, next) {
+  if (!req.session.user || !req.session.projectId) return res.redirect('/auth/twitch');
+  try {
+    const membership = await getActiveMembership(req.session.projectId, req.session.user.id);
+    if (!membership) return res.redirect('/auth/twitch');
+    req.projectAccess = { projectId: req.session.projectId, role: membership.role };
+    next();
+  } catch (_) {
+    res.status(503).send('No se pudo validar el acceso al proyecto. Volvé a intentarlo.');
+  }
+}
+
+async function findViewerProject(token) {
+  if (!token || token.length < 30) return null;
+  const result = await supabaseAdmin.from('projects')
+    .select('id, overlay_enabled, subscription_status, trial_ends_at')
+    .eq('viewer_token_hash', hashOpaqueToken(token))
+    .maybeSingle();
+  const project = databaseError(result, 'No se pudo validar el Viewer.');
+  if (!project || project.subscription_status === 'suspended' || project.subscription_status === 'canceled') return null;
+  if (project.subscription_status === 'trialing' && project.trial_ends_at && new Date(project.trial_ends_at) <= new Date()) return null;
+  return project;
+}
+
+// Inicia OAuth con Authorization Code Grant. El state evita que un sitio externo
+// pueda completar un inicio de sesión iniciado desde otro navegador (CSRF).
+app.get('/auth/twitch', (req, res) => {
+  if (!twitchIsConfigured()) return twitchConfigurationError(res);
+
+  const state = crypto.randomBytes(32).toString('hex');
+  req.session.twitchOAuthState = state;
+
+  const authorizationUrl = new URL('https://id.twitch.tv/oauth2/authorize');
+  authorizationUrl.searchParams.set('client_id', TWITCH_CLIENT_ID);
+  authorizationUrl.searchParams.set('redirect_uri', TWITCH_REDIRECT_URI);
+  authorizationUrl.searchParams.set('response_type', 'code');
+  // Sólo usamos Twitch para comprobar la identidad. No solicitamos correo ni
+  // permisos de chat, moderación o administración que Tango GG no utiliza.
+  authorizationUrl.searchParams.set('state', state);
+  // Guardamos explícitamente antes de salir a Twitch. Sin esto, algunos
+  // navegadores pueden volver del OAuth antes de que la sesión temporal que
+  // contiene `state` haya quedado escrita, provocando un falso error CSRF.
+  req.session.save((saveError) => {
+    if (saveError) return res.status(500).send('No se pudo preparar el inicio de sesión de Twitch. Volvé a intentarlo.');
+    res.redirect(authorizationUrl.toString());
+  });
+});
+
+app.get('/auth/twitch/callback', async (req, res) => {
+  if (!twitchIsConfigured()) return twitchConfigurationError(res);
+  const { code, state, error, error_description: errorDescription } = req.query;
+
+  if (error) return res.status(400).send(`Twitch canceló la autorización: ${errorDescription || error}`);
+  if (!code || !state || state !== req.session.twitchOAuthState) {
+    return res.status(400).send('No se pudo validar el inicio de sesión de Twitch. Volvé a intentarlo.');
+  }
+
+  try {
+    const tokenResponse = await fetch('https://id.twitch.tv/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: TWITCH_CLIENT_ID,
+        client_secret: TWITCH_CLIENT_SECRET,
+        code: String(code),
+        grant_type: 'authorization_code',
+        redirect_uri: TWITCH_REDIRECT_URI
+      })
+    });
+    const tokens = await tokenResponse.json();
+    if (!tokenResponse.ok || !tokens.access_token) {
+      console.error('Twitch token exchange failed:', tokens);
+      return res.status(502).send('Twitch no pudo completar la autorización. Volvé a intentarlo.');
+    }
+
+    const userResponse = await fetch('https://api.twitch.tv/helix/users', {
+      headers: {
+        'Client-Id': TWITCH_CLIENT_ID,
+        Authorization: `Bearer ${tokens.access_token}`
+      }
+    });
+    const userPayload = await userResponse.json();
+    const user = userPayload && userPayload.data && userPayload.data[0];
+    if (!userResponse.ok || !user) {
+      console.error('Twitch user lookup failed:', userPayload);
+      return res.status(502).send('No se pudo obtener la cuenta de Twitch. Volvé a intentarlo.');
+    }
+
+    const pendingInviteToken = req.session.pendingInviteToken;
+    const projectAccess = pendingInviteToken
+      ? await acceptProjectInvite(pendingInviteToken, user)
+      : await ensureOwnerProject(user);
+
+    req.session.regenerate((sessionError) => {
+      if (sessionError) return res.status(500).send('No se pudo crear la sesión. Volvé a intentarlo.');
+      req.session.user = {
+        id: user.id,
+        login: user.login,
+        displayName: user.display_name,
+        profileImageUrl: user.profile_image_url
+      };
+      // El token OAuth se usa únicamente arriba para consultar la identidad y
+      // luego se descarta. La sesión conserva sólo los datos mínimos del usuario.
+      req.session.projectId = projectAccess.project.id;
+      req.session.projectRole = projectAccess.role;
+      // El token del Viewer solo se conserva una vez en la sesión del dueño.
+      // Luego se podrá rotar desde la configuración sin revelar el anterior.
+      req.session.newViewerToken = projectAccess.viewerToken || null;
+      req.session.save((saveError) => {
+        if (saveError) return res.status(500).send('No se pudo guardar la sesión. Volvé a intentarlo.');
+        res.redirect('/editor.html');
+      });
+    });
+  } catch (error) {
+    console.error('Twitch OAuth callback error:', error);
+    res.status(500).send('Ocurrió un error al conectar con Twitch. Volvé a intentarlo.');
+  }
+});
+
+app.get('/api/auth/me', (req, res) => {
+  res.json({ authenticated: Boolean(req.session.user), user: req.session.user || null });
+});
+
+app.post('/auth/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.clearCookie('tango.sid');
+    res.status(204).end();
+  });
+});
+
+// El editor siempre requiere una sesión Twitch válida.
+app.get('/editor.html', requireEditorPage, (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'editor.html'));
+});
+
+// El Viewer privado recibe un token impredecible. No existe un Viewer genérico.
+app.get('/viewer/:token', async (req, res) => {
+  try {
+    const project = await findViewerProject(req.params.token);
+    if (!project) return res.status(404).send('El enlace del Viewer no es válido o ya no está activo.');
+    const viewerHtml = fs.readFileSync(path.join(__dirname, 'public', 'viewer.html'), 'utf8');
+    const bootstrap = `<script>window.__TANGO_VIEWER_TOKEN__=${JSON.stringify(req.params.token)};</script>`;
+    res.type('html').send(viewerHtml.replace('</head>', `${bootstrap}</head>`));
+  } catch (_) {
+    res.status(503).send('No se pudo abrir el Viewer. Volvé a intentarlo.');
+  }
+});
+
+app.get('/viewer.html', (_req, res) => {
+  res.status(404).send('Usá el enlace privado del Viewer generado para tu proyecto.');
+});
+
+// El resto de archivos visuales sigue siendo estático; ninguna clave sale del servidor.
+app.use(express.static(path.join(__dirname, 'public')));
+
+let STATE = emptyScene();
+let ACTIVE_PROJECT_ID = null;
+
+app.get('/state', requireEditorApi, async (req, res) => {
+  try {
+    const state = await loadProjectScene(req.projectAccess.projectId);
+    res.json({ serverTime: Date.now(), state });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo cargar la escena.' });
+  }
+});
+
+app.post('/state', requireEditorApi, async (req, res) => {
+  if (!req.body || typeof req.body !== 'object') return res.status(400).json({ error: 'No body' });
+  try {
+    const projectId = req.projectAccess.projectId;
+    const fallback = await loadProjectScene(projectId);
+    const state = normalizeScene(req.body, fallback);
+    projectStateCache.set(projectId, state);
+    await saveProjectScene(projectId, req.session.user.id);
+    broadcastWS({ type: 'snapshot', state }, null, projectId);
+    recordAudit(projectId, req.session.user.id, 'scene.saved').catch(() => {});
+    res.json({ ok: true, serverTime: state.updatedAt });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo guardar la escena.' });
+  }
+});
+
+function uploadAsset(upload) {
+  return (req, res) => {
+    upload.single('file')(req, res, async (error) => {
+      if (error) {
+        if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+          return res.status(413).json({ error: 'El archivo supera el límite de 25 MB.' });
+        }
+        return res.status(415).json({ error: error.message || 'No se pudo validar el archivo.' });
+      }
+      if (!req.file) return res.status(400).json({ error: 'Seleccioná un archivo para subir.' });
+
+      let publicUrl;
+      if (useSupabaseStorage) {
+        const extension = path.extname(req.file.originalname).toLowerCase();
+        const objectPath = `${req.projectAccess.projectId}/${crypto.randomUUID()}${extension}`;
+        const { error: storageError } = await supabaseAdmin.storage
+          .from(SUPABASE_STORAGE_BUCKET)
+          .upload(objectPath, req.file.buffer, {
+            cacheControl: '31536000',
+            contentType: req.file.mimetype,
+            upsert: false
+          });
+        if (storageError) {
+          console.error('No se pudo subir el archivo a Supabase Storage:', storageError.message);
+          return res.status(503).json({ error: 'No se pudo guardar el archivo. Volvé a intentarlo.' });
+        }
+        publicUrl = supabaseAdmin.storage.from(SUPABASE_STORAGE_BUCKET).getPublicUrl(objectPath).data.publicUrl;
+      } else {
+        publicUrl = `/uploads/${req.file.filename}`;
+      }
+
+      // El evento WebSocket asset:*:add deja el registro detallado (imagen o
+      // audio) sólo cuando realmente se incorpora a la biblioteca compartida.
+      res.json({ url: publicUrl });
+    });
+  };
+}
+
+// Solo alguien con acceso al proyecto puede cargar imágenes y audios para su overlay.
+app.post('/upload/image', requireEditorApi, uploadAsset(imageUpload));
+app.post('/upload/audio', requireEditorApi, uploadAsset(audioUpload));
+
+app.post('/reset', requireOwnerApi, async (req, res) => {
+  try {
+    const projectId = req.projectAccess.projectId;
+    const state = emptyScene();
+    projectStateCache.set(projectId, state);
+    await saveProjectScene(projectId, req.session.user.id);
+    broadcastWS({ type: 'snapshot', state }, null, projectId);
+    recordAudit(projectId, req.session.user.id, 'scene.reset').catch(() => {});
+    res.json({ ok: true });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo reiniciar la escena.' });
+  }
+});
+
+function requestOrigin(req) {
+  // Las rutas Express tienen req.get()/req.protocol; las conexiones WebSocket
+  // reciben el IncomingMessage nativo de Node. Ambos formatos deben soportarse.
+  const header = (name) => typeof req.get === 'function' ? req.get(name) : req.headers?.[name.toLowerCase()];
+  const forwardedProtocol = header('x-forwarded-proto');
+  const protocol = String(
+    forwardedProtocol || req.protocol || (req.socket?.encrypted ? 'https' : 'http')
+  ).split(',')[0].trim();
+  const host = header('host') || `localhost:${PORT}`;
+  return `${protocol}://${host}`;
+}
+
+app.get('/api/project', requireEditorApi, async (req, res) => {
+  try {
+    const result = await supabaseAdmin.from('projects')
+      .select('id, twitch_channel_login, chat_enabled, stream_preview_enabled, overlay_enabled, subscription_status, trial_ends_at')
+      .eq('id', req.projectAccess.projectId)
+      .single();
+    const project = databaseError(result, 'No se pudo cargar el proyecto.');
+    const viewerToken = req.session.newViewerToken || null;
+    req.session.newViewerToken = null;
+    req.session.save(() => {});
+    res.json({
+      project,
+      role: req.projectAccess.role,
+      user: req.session.user,
+      viewerUrl: viewerToken ? `${requestOrigin(req)}/viewer/${viewerToken}` : null
+    });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo cargar la configuración del proyecto.' });
+  }
+});
+
+app.post('/api/project/viewer-token', requireOwnerApi, async (req, res) => {
+  try {
+    const viewerToken = crypto.randomBytes(32).toString('base64url');
+    const result = await supabaseAdmin.from('projects').update({
+      viewer_token_hash: hashOpaqueToken(viewerToken),
+      viewer_token_created_at: new Date().toISOString()
+    }).eq('id', req.projectAccess.projectId);
+    databaseError(result, 'No se pudo renovar el Viewer.');
+    wss.clients.forEach(client => {
+      if (client.role === 'viewer' && client.projectId === req.projectAccess.projectId) client.close(4002, 'El enlace del Viewer fue renovado');
+    });
+    recordAudit(req.projectAccess.projectId, req.session.user.id, 'viewer.token_rotated').catch(() => {});
+    res.json({ viewerUrl: `${requestOrigin(req)}/viewer/${viewerToken}` });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo renovar el enlace del Viewer.' });
+  }
+});
+
+app.patch('/api/project/settings', requireOwnerApi, async (req, res) => {
+  const changes = {};
+  if (typeof req.body.chatEnabled === 'boolean') changes.chat_enabled = req.body.chatEnabled;
+  if (typeof req.body.streamPreviewEnabled === 'boolean') changes.stream_preview_enabled = req.body.streamPreviewEnabled;
+  if (!Object.keys(changes).length) return res.status(400).json({ error: 'No hay cambios válidos.' });
+  try {
+    const result = await supabaseAdmin.from('projects').update(changes)
+      .eq('id', req.projectAccess.projectId)
+      .select('chat_enabled, stream_preview_enabled, overlay_enabled')
+      .single();
+    const project = databaseError(result, 'No se pudo guardar la configuración.');
+    broadcastWS({ type: 'project:settings', payload: project }, null, req.projectAccess.projectId);
+    recordAudit(req.projectAccess.projectId, req.session.user.id, 'project.settings_updated').catch(() => {});
+    res.json({ project });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo guardar la configuración.' });
+  }
+});
+
+app.post('/api/project/panic', requireEditorApi, async (req, res) => {
+  try {
+    const result = await supabaseAdmin.from('projects').update({ overlay_enabled: false })
+      .eq('id', req.projectAccess.projectId)
+      .select('overlay_enabled')
+      .single();
+    const project = databaseError(result, 'No se pudo activar el modo pánico.');
+    wss.clients.forEach(client => {
+      if (client.role === 'viewer' && client.projectId === req.projectAccess.projectId) client.overlayEnabled = false;
+    });
+    const empty = emptyScene();
+    broadcastViewerWS({ type: 'snapshot', state: empty }, req.projectAccess.projectId);
+    broadcastWS({ type: 'project:settings', payload: project }, null, req.projectAccess.projectId);
+    recordAudit(req.projectAccess.projectId, req.session.user.id, 'overlay.panic_enabled').catch(() => {});
+    res.status(204).end();
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo activar el modo pánico.' });
+  }
+});
+
+app.post('/api/project/restore', requireEditorApi, async (req, res) => {
+  try {
+    const projectId = req.projectAccess.projectId;
+    const result = await supabaseAdmin.from('projects').update({ overlay_enabled: true })
+      .eq('id', projectId)
+      .select('overlay_enabled')
+      .single();
+    const project = databaseError(result, 'No se pudo restaurar el overlay.');
+    wss.clients.forEach(client => {
+      if (client.role === 'viewer' && client.projectId === projectId) client.overlayEnabled = true;
+    });
+    const state = await loadProjectScene(projectId);
+    broadcastViewerWS({ type: 'snapshot', state }, projectId);
+    broadcastWS({ type: 'project:settings', payload: project }, null, projectId);
+    recordAudit(projectId, req.session.user.id, 'overlay.restored').catch(() => {});
+    res.status(204).end();
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo restaurar el overlay.' });
+  }
+});
+
+app.get('/api/project/members', requireEditorApi, async (req, res) => {
+  try {
+    const result = await supabaseAdmin.from('project_members')
+      .select('member_twitch_id, role, active, joined_at')
+      .eq('project_id', req.projectAccess.projectId)
+      .order('created_at', { ascending: true });
+    const members = databaseError(result, 'No se pudo cargar los invitados.');
+    const ids = members.map(member => member.member_twitch_id);
+    const usersResult = ids.length
+      ? await supabaseAdmin.from('twitch_users').select('twitch_id, login, display_name').in('twitch_id', ids)
+      : { data: [], error: null };
+    const users = databaseError(usersResult, 'No se pudo cargar los perfiles.');
+    const usersById = new Map(users.map(user => [user.twitch_id, user]));
+    res.json({ members: members.map(member => ({ ...member, user: usersById.get(member.member_twitch_id) || null })) });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo cargar los invitados.' });
+  }
+});
+
+app.get('/api/project/audit', requireEditorApi, async (req, res) => {
+  try {
+    // Nunca se acepta un projectId desde el navegador: se usa exclusivamente
+    // el proyecto que el servidor ya validó para esta sesión.
+    const eventsResult = await supabaseAdmin.from('audit_events')
+      .select('id, actor_twitch_id, action, entity_type, entity_id, created_at')
+      .eq('project_id', req.projectAccess.projectId)
+      .order('created_at', { ascending: false })
+      .limit(30);
+    const events = databaseError(eventsResult, 'No se pudo cargar la actividad.');
+    const actorIds = [...new Set(events.map(event => event.actor_twitch_id).filter(Boolean))];
+    const usersResult = actorIds.length
+      ? await supabaseAdmin.from('twitch_users').select('twitch_id, login, display_name').in('twitch_id', actorIds)
+      : { data: [], error: null };
+    const users = databaseError(usersResult, 'No se pudieron cargar los perfiles de actividad.');
+    const usersById = new Map(users.map(user => [user.twitch_id, user]));
+    res.json({
+      events: events.map(event => ({
+        id: event.id,
+        action: event.action,
+        entityType: event.entity_type,
+        entityId: event.entity_id,
+        createdAt: event.created_at,
+        actor: event.actor_twitch_id ? usersById.get(event.actor_twitch_id) || { twitch_id: event.actor_twitch_id } : null
+      }))
+    });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo cargar la actividad del proyecto.' });
+  }
+});
+
+app.post('/api/project/invites', requireOwnerApi, async (req, res) => {
+  try {
+    const projectId = req.projectAccess.projectId;
+    const countResult = await supabaseAdmin.from('project_members')
+      .select('*', { count: 'exact', head: true })
+      .eq('project_id', projectId)
+      .eq('role', 'editor')
+      .eq('active', true);
+    databaseError(countResult, 'No se pudo comprobar el límite de invitados.');
+    if ((countResult.count || 0) >= 2) return res.status(409).json({ error: 'Ya tenés dos invitados activos.' });
+
+    const token = crypto.randomBytes(32).toString('base64url');
+    const result = await supabaseAdmin.from('project_invites').insert({
+      project_id: projectId,
+      token_hash: hashOpaqueToken(token),
+      created_by_twitch_id: req.session.user.id,
+      expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+    });
+    databaseError(result, 'No se pudo crear la invitación.');
+    recordAudit(projectId, req.session.user.id, 'member.invite_created').catch(() => {});
+    res.json({ inviteUrl: `${requestOrigin(req)}/invite/${token}`, expiresInDays: 7 });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo crear la invitación.' });
+  }
+});
+
+app.delete('/api/project/members/:twitchId', requireOwnerApi, async (req, res) => {
+  if (req.params.twitchId === req.session.user.id) return res.status(400).json({ error: 'El streamer no puede quitarse a sí mismo.' });
+  try {
+    const result = await supabaseAdmin.from('project_members').update({ active: false })
+      .eq('project_id', req.projectAccess.projectId)
+      .eq('member_twitch_id', req.params.twitchId)
+      .eq('role', 'editor');
+    databaseError(result, 'No se pudo quitar el invitado.');
+    wss.clients.forEach(client => {
+      if (client.role === 'editor' && client.projectId === req.projectAccess.projectId && client.twitchId === req.params.twitchId) client.close(4003, 'Acceso revocado');
+    });
+    recordAudit(req.projectAccess.projectId, req.session.user.id, 'member.removed', 'member', req.params.twitchId).catch(() => {});
+    res.status(204).end();
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo quitar el invitado.' });
+  }
+});
+
+app.get('/invite/:token', (req, res) => {
+  if (!req.params.token || req.params.token.length < 30) return res.status(404).send('Invitación no válida.');
+  req.session.pendingInviteToken = req.params.token;
+  req.session.save(() => res.redirect('/auth/twitch'));
 });
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-function broadcastWS(obj, except = null) {
+function broadcastWS(obj, except = null, projectId = ACTIVE_PROJECT_ID) {
   const raw = JSON.stringify(obj);
   wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN && client !== except) {
+    if (client.readyState === WebSocket.OPEN && client !== except && client.projectId === projectId && (client.role !== 'viewer' || client.overlayEnabled)) {
       client.send(raw);
     }
   });
 }
 
-// WS protocol: hello; editors send incremental events; server updates STATE for snapshot-worthy events and rebroadcasts.
+function broadcastViewerWS(obj, projectId) {
+  const raw = JSON.stringify(obj);
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN && client.role === 'viewer' && client.projectId === projectId) client.send(raw);
+  });
+}
+
+function isAllowedWebSocketOrigin(req) {
+  // Los navegadores normales siempre informan Origin. Se acepta su ausencia
+  // para no romper la fuente de navegador de OBS, que puede omitirlo.
+  const origin = req.headers.origin;
+  return !origin || origin === requestOrigin(req);
+}
+
+// WS protocol: el servidor valida identidad/rol antes de entregar una escena.
 wss.on('connection', (ws, req) => {
-  ws.isAlive = true;
-  ws.role = 'unknown';
+  if (!isAllowedWebSocketOrigin(req)) return ws.close(1008, 'Origen no permitido');
+  // express-session puede tardar unos milisegundos en leer la sesión. El
+  // navegador, en cambio, envía "hello" apenas abre el socket. Conservamos
+  // esos primeros mensajes para no perder la presentación del editor.
+  const earlyMessages = [];
+  const queueEarlyMessage = (message) => earlyMessages.push(message);
+  ws.on('message', queueEarlyMessage);
+  sessionMiddleware(req, {}, (sessionError) => {
+    if (sessionError) {
+      ws.off('message', queueEarlyMessage);
+      return ws.close(1011, 'No se pudo validar la sesión');
+    }
+    ws.isAlive = true;
+    ws.role = 'unknown';
+    ws.projectId = null;
+    ws.isReady = false;
+    ws.readyPromise = null;
 
-  ws.on('pong', () => ws.isAlive = true);
+    ws.on('pong', () => ws.isAlive = true);
 
-  ws.on('message', (msg) => {
+    ws.off('message', queueEarlyMessage);
+    const handleIncomingMessage = async (msg) => {
     let data;
     try { data = JSON.parse(msg); } catch (e) { return; }
 
-    if (data.type === 'hello') {
-      ws.role = data.role || 'viewer';
-      // send current snapshot immediately
-      ws.send(JSON.stringify({ type: 'snapshot', state: STATE }));
-      return;
+    // Un editor autenticado puede llegar a enviar una acción antes del mensaje
+    // de presentación por una carrera del navegador. Conservamos esa acción,
+    // completamos primero la autenticación con la sesión HTTP ya validada y
+    // luego la procesamos normalmente.
+    let deferredMessage = null;
+    if (data.type !== 'hello' && !ws.readyPromise) {
+      deferredMessage = data;
+      data = { type: 'hello', role: 'editor' };
     }
+
+    if (data.type === 'hello') {
+      if (ws.readyPromise) {
+        try { await ws.readyPromise; } catch (_) {}
+        return;
+      }
+      // La validación de membresía consulta Supabase y es asíncrona. Mientras
+      // termina, el navegador puede enviar el primer trazo: lo hacemos esperar
+      // a esta misma promesa en vez de cerrarlo erróneamente como no autorizado.
+      ws.readyPromise = (async () => {
+        try {
+        if (data.role === 'editor') {
+          if (!req.session.user || !req.session.projectId) return ws.close(1008, 'Iniciá sesión con Twitch');
+          const membership = await getActiveMembership(req.session.projectId, req.session.user.id);
+          if (!membership) return ws.close(1008, 'No tenés acceso a este proyecto');
+          ws.role = 'editor';
+          ws.twitchId = req.session.user.id;
+          ws.projectId = req.session.projectId;
+          ws.projectRole = membership.role;
+        } else if (data.role === 'viewer') {
+          const viewerToken = new URL(req.url, 'http://localhost').searchParams.get('viewer_token');
+          const project = await findViewerProject(viewerToken);
+          if (!project) return ws.close(1008, 'Viewer no válido');
+          ws.role = 'viewer';
+          ws.projectId = project.id;
+          ws.viewerSessionId = crypto.randomUUID();
+          wss.clients.forEach(client => {
+            if (client !== ws && client.role === 'viewer' && client.projectId === project.id) client.close(4001, 'El Viewer se abrió en otra fuente');
+          });
+          await supabaseAdmin.from('project_viewer_sessions').upsert({
+            project_id: project.id,
+            session_id: ws.viewerSessionId,
+            last_seen_at: new Date().toISOString()
+          });
+          ws.overlayEnabled = project.overlay_enabled;
+        } else {
+          return ws.close(1008, 'Rol inválido');
+        }
+
+        const state = await loadProjectScene(ws.projectId);
+        ws.state = state;
+        ws.isReady = true;
+        if (ws.role === 'editor') {
+          ws.send(JSON.stringify({
+            type: 'room:connected',
+            payload: { roomCode: String(ws.projectId).slice(-8).toUpperCase(), role: ws.projectRole }
+          }));
+        }
+        ws.send(JSON.stringify({ type: 'snapshot', state: ws.role === 'viewer' && !ws.overlayEnabled ? emptyScene() : state }));
+      } catch (error) {
+        console.error('WebSocket hello error:', error.message);
+        ws.close(1011, 'No se pudo abrir el proyecto');
+        throw error;
+      }
+      })();
+      try { await ws.readyPromise; } catch (_) {}
+      if (!deferredMessage) return;
+      data = deferredMessage;
+    }
+
+    if (ws.readyPromise && !ws.isReady) {
+      try { await ws.readyPromise; } catch (_) { return; }
+    }
+    if (ws.role !== 'editor' || !ws.projectId || !ws.state || !ws.isReady) return ws.close(1008, 'No autorizado');
+    ACTIVE_PROJECT_ID = ws.projectId;
+    // La escena compartida del proyecto es la única fuente de verdad. No usamos
+    // una copia vieja de otro socket, porque un editor podría sobrescribir
+    // cambios recientes hechos por un moderador distinto.
+    STATE = projectStateCache.get(ws.projectId) || ws.state;
 
     switch (data.type) {
       // stroke events
@@ -140,7 +983,10 @@ wss.on('connection', (ws, req) => {
           STATE.strokes.push(data.payload);
           STATE.updatedAt = Date.now();
         }
-        broadcastWS(data, null);
+        // El autor ya añadió este punto a su canvas local. Reenviarlo de vuelta
+        // con retraso desordena el trazo predicho localmente; sólo lo necesitan
+        // los demás editores y el Viewer.
+        broadcastWS(data, ws);
         break;
       case 'stroke:point':
         if (data.payload && data.payload.id && data.payload.point) {
@@ -148,11 +994,14 @@ wss.on('connection', (ws, req) => {
           if (s) s.points.push(data.payload.point);
           STATE.updatedAt = Date.now();
         }
-        broadcastWS(data, null);
+        broadcastWS(data, ws);
         break;
       case 'stroke:end':
         STATE.updatedAt = Date.now();
-        broadcastWS(data, null);
+        // Los puntos se transmiten en vivo mientras se dibuja. Al soltar el
+        // pincel enviamos además la escena autoritativa completa para que dos
+        // editores nunca terminen mostrando versiones distintas del trazo.
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
         break;
 
       // image/canvas events
@@ -161,7 +1010,10 @@ wss.on('connection', (ws, req) => {
           STATE.images.push(data.payload);
           STATE.updatedAt = Date.now();
         }
-        broadcastWS(data, null);
+        // Una imagen afecta tanto al editor como al Viewer. Enviar el estado
+        // completo evita que un editor que estaba conectándose quede con una
+        // biblioteca/canvas parcial por haber perdido un evento incremental.
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
         break;
       case 'image:update':
         if (data.payload && data.payload.id) {
@@ -171,14 +1023,14 @@ wss.on('connection', (ws, req) => {
             STATE.updatedAt = Date.now();
           }
         }
-        broadcastWS(data, null);
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
         break;
       case 'image:remove':
         if (data.payload && data.payload.id) {
           STATE.images = STATE.images.filter(x => x.id !== data.payload.id);
           STATE.updatedAt = Date.now();
         }
-        broadcastWS(data, null);
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
         break;
 
       // assets (biblioteca)
@@ -211,18 +1063,19 @@ wss.on('connection', (ws, req) => {
         if (data.payload && data.payload.id) {
           STATE.assets.audio = STATE.assets.audio.filter(x => x.id !== data.payload.id);
           STATE.audio.playlist = STATE.audio.playlist.filter(x => x.id !== data.payload.id);
+          Object.keys(STATE.audio.slots || {}).forEach(slot => {
+            if (STATE.audio.slots[slot] && STATE.audio.slots[slot].id === data.payload.id) delete STATE.audio.slots[slot];
+          });
+          if (STATE.audio.current && STATE.audio.current.url === data.payload.url) STATE.audio.current = null;
           STATE.updatedAt = Date.now();
         }
-        broadcastWS({ type: 'assets:update', payload: STATE.assets }, null);
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
         break;
 
       // viewport
       case 'viewport:update':
-        if (data.payload) {
-          STATE.viewport = Object.assign({}, STATE.viewport, data.payload);
-          STATE.updatedAt = Date.now();
-        }
-        broadcastWS(data, null);
+        // El encuadre es una preferencia visual local. Nunca debe cambiar la
+        // vista de los demás editores ni formar parte de la escena compartida.
         break;
 
       // audio
@@ -237,15 +1090,6 @@ wss.on('connection', (ws, req) => {
         STATE.audio.current = null;
         STATE.updatedAt = Date.now();
         broadcastWS({ type: 'audio:stop' }, null);
-        break;
-
-      case 'asset:font:add':
-        if (data.payload) {
-          STATE.assets.fonts = STATE.assets.fonts || [];
-          STATE.assets.fonts.push(data.payload);
-          STATE.updatedAt = Date.now();
-        }
-        broadcastWS({ type: 'assets:update', payload: STATE.assets }, null);
         break;
 
       case 'text:add':
@@ -303,7 +1147,7 @@ wss.on('connection', (ws, req) => {
       // snapshot (full)
       case 'snapshot':
         if (data.payload && typeof data.payload === 'object') {
-          STATE = Object.assign({}, STATE, data.payload, { updatedAt: Date.now() });
+          Object.assign(STATE, data.payload, { updatedAt: Date.now() });
         }
         broadcastWS({ type: 'snapshot', state: STATE }, null);
         break;
@@ -311,9 +1155,53 @@ wss.on('connection', (ws, req) => {
       default:
         broadcastWS(data, null);
     }
-  });
+    projectStateCache.set(ws.projectId, STATE);
+    // Todos los sockets del mismo proyecto comparten la misma referencia en
+    // memoria: el próximo cambio siempre parte del estado más reciente.
+    wss.clients.forEach(client => {
+      if (client.projectId === ws.projectId) client.state = STATE;
+    });
+    scheduleSceneSave(ws.projectId, ws.twitchId);
 
-  ws.on('close', () => { /* noop */ });
+    const auditable = new Set([
+      'stroke:end',
+      'image:add', 'image:update', 'image:remove',
+      'asset:image:add', 'asset:image:delete',
+      'asset:audio:add', 'asset:audio:delete',
+      'text:add', 'text:update', 'text:remove',
+      'timer:add', 'timer:update', 'timer:remove',
+      'audio:trigger', 'audio:stop', 'audio:pause', 'audio:resume'
+    ]);
+    if (auditable.has(data.type)) {
+      const action = data.type.replace(':', '.');
+      const entityId = data.payload && data.payload.id ? String(data.payload.id) : null;
+      if (data.type.endsWith(':update')) scheduleAuditUpdate(ws.projectId, ws.twitchId, action, entityId);
+      else recordAudit(ws.projectId, ws.twitchId, action, null, entityId).catch(() => {});
+    }
+    };
+
+    ws.on('message', handleIncomingMessage);
+    // Los mensajes llegaron antes de que la sesión terminara de cargarse.
+    // Se procesan en el mismo orden en que los envió el navegador.
+    earlyMessages.forEach(message => { void handleIncomingMessage(message); });
+
+    ws.on('error', (error) => {
+      console.error(`WebSocket error en sala ${ws.projectId || 'desconocida'}:`, error.message);
+    });
+
+    ws.on('close', (code, reason) => {
+      const closeReason = reason && reason.length ? reason.toString() : 'sin motivo';
+      console.warn(`WebSocket cerrado: sala=${ws.projectId || 'desconocida'} usuario=${ws.twitchId || 'anónimo'} código=${code} motivo=${closeReason}`);
+      if (ws.role === 'viewer' && ws.projectId && ws.viewerSessionId) {
+        supabaseAdmin.from('project_viewer_sessions')
+          .delete()
+          .eq('project_id', ws.projectId)
+          .eq('session_id', ws.viewerSessionId)
+          .then(() => {})
+          .catch(() => {});
+      }
+    });
+  });
 });
 
 // heartbeat to clean dead clients
@@ -326,7 +1214,7 @@ const interval = setInterval(() => {
 }, 30000);
 
 server.listen(PORT, () => {
-  console.log(`Telestrator MVP server listening on http://localhost:${PORT}`);
-  console.log('Viewer: http://localhost:' + PORT + '/viewer.html');
-  console.log('Editor: http://localhost:' + PORT + '/editor.html');
+  console.log(`Tango GG server listening on http://localhost:${PORT}`);
+  console.log('Editor: http://localhost:' + PORT + '/editor.html (requiere Twitch)');
+  console.log('Viewer: se genera como enlace privado desde Configuración.');
 });

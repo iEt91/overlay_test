@@ -12,119 +12,115 @@
 </head>
 <body>
   <div id="app">
-    <div class="topbar">
-      <div class="brand"><span class="brand-mark">T</span><div><h1>Telestrator</h1><span>Live overlay console</span></div></div>
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">T</span><span class="brand-name">Telestrator</span></div>
       <div class="top-controls">
-        <label class="master-volume">
-          <span>Volumen</span>
-          <input id="masterVolume" type="range" min="0" max="100" value="100" />
-        </label>
-        <button id="btn-undo" title="Deshacer">↶</button>
-        <button id="btn-clean" title="Limpiar canvas">⌫</button>
+        <section class="soundboard-top" aria-label="Soundboard"><span class="soundboard-label">Soundboard</span><div class="soundboard-actions"><button id="btn-sound-pause" type="button" title="Pausar o reanudar">Ⅱ</button><button id="btn-sound-stop" type="button" title="Detener">■</button></div><div id="soundboard" class="soundboard" aria-label="Soundboard de 0 a 9"></div><span class="soundboard-shortcut">Atajos: 0–9</span></section>
+        <span class="top-divider soundboard-divider" aria-hidden="true"></span>
+        <label class="master-volume"><span class="control-icon" aria-hidden="true">◖</span><span>Volumen general</span><input id="masterVolume" type="range" min="0" max="100" value="100" /></label>
+        <span class="top-divider" aria-hidden="true"></span>
+        <button id="btn-undo" class="top-action" title="Deshacer (Ctrl+Z)"><span>↶</span> Deshacer <kbd>Ctrl+Z</kbd></button>
+        <span class="top-divider" aria-hidden="true"></span>
+        <button id="btn-clean" class="top-action" title="Limpiar canvas"><svg class="action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 3 11 11"/><path d="m14 14 5-5 2 2-5 5-5-1z"/><path d="m10 19 5 1"/></svg> Limpiar canvas</button>
+        <span class="top-divider overlay-control-divider" aria-hidden="true"></span>
+        <button id="btn-overlay-visibility" class="overlay-visibility" type="button" aria-pressed="true" aria-label="Ocultar overlay en el Viewer" title="Ocultar overlay en el Viewer">
+          <svg class="overlay-eye eye-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.7"/></svg>
+          <svg class="overlay-eye eye-closed" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3 21 21"/><path d="M10.6 5.1A10.7 10.7 0 0 1 12 5c6 0 9.5 7 9.5 7a17.2 17.2 0 0 1-3 3.7M6.1 6.1C3.7 8.1 2.5 12 2.5 12S6 19 12 19c1.4 0 2.7-.3 3.8-.8M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+        </button>
       </div>
-    </div>
+    </header>
 
     <div class="row">
-      <div class="leftpanel">
-        <div class="left-tabs">
-          <button class="tab-btn active" data-tab="tools" title="Herramienta">🖌️</button>
-          <button class="tab-btn" data-tab="images" title="Imágenes/GIFs">🖼️</button>
-          <button class="tab-btn" data-tab="audio" title="Audio">🎵</button>
-          <button class="tab-btn" data-tab="paragraphs" title="Párrafos">📝</button>
-          <button class="tab-btn" data-tab="control" title="Control">⚙️</button>
-        </div>
+      <nav class="tool-rail" aria-label="Herramientas">
+        <button class="tab-btn active" data-tab="tools" title="Pincel"><span class="tool-icon">✎</span><span>Pincel</span></button>
+        <button class="tab-btn" data-tab="images" title="Imágenes y GIFs"><span class="tool-icon">▧</span><span>Imágenes / GIFs</span></button>
+        <button class="tab-btn" data-tab="audio" title="Audio"><span class="tool-icon">♬</span><span>Audio</span></button>
+        <button class="tab-btn" data-tab="paragraphs" title="Texto y cronómetros"><span class="tool-icon">T</span><span>Texto y cronómetros</span></button>
+        <button class="tab-btn" data-tab="control" title="Configuración y control"><span class="tool-icon">⚙</span><span>Configuración y control</span></button>
+      </nav>
 
+      <aside class="leftpanel">
         <div class="panel tab-panel" id="panel-tools" data-tab="tools">
-          <h3>Herramienta</h3>
-          <div style="margin-top:8px">
-            <label>Color: <input id="brushColor" type="color" value="#ff0000"></label>
-            <label style="margin-left:8px">Grosor: <input id="brushSize" type="range" min="1" max="60" value="6"></label>
-            <div style="margin-top:8px"><button id="btn-clear-local">Limpiar trazos locales</button></div>
-          </div>
+          <div class="panel-title"><span class="eyebrow">HERRAMIENTA</span><h2>Pincel</h2></div>
+          <label class="field-label">Color</label>
+          <div class="color-control"><input id="brushColor" type="color" value="#ff0000"><output id="brushColorLabel">#FF0000</output></div>
+          <div class="swatch-row" aria-label="Colores rápidos"><button type="button" data-color="#14c4b8" style="background:#14c4b8" title="Turquesa"></button><button type="button" data-color="#5fcf72" style="background:#5fcf72" title="Verde"></button><button type="button" data-color="#f8c64e" style="background:#f8c64e" title="Amarillo"></button><button type="button" data-color="#f18a49" style="background:#f18a49" title="Naranja"></button><button type="button" data-color="#e95858" style="background:#e95858" title="Rojo"></button><button type="button" data-color="#9166ed" style="background:#9166ed" title="Violeta"></button><button type="button" data-color="#f3f4f6" style="background:#f3f4f6" title="Blanco"></button></div>
+          <label class="range-field">Grosor <output id="brushSizeValue">6 px</output><input id="brushSize" type="range" min="1" max="60" value="6"></label>
+          <p class="small">El pincel solo se activa en esta pestaña.</p>
+          <button id="btn-clear-local" class="secondary-action" type="button"><svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 3 11 11"/><path d="m14 14 5-5 2 2-5 5-5-1z"/><path d="m10 19 5 1"/></svg> Limpiar trazos</button>
         </div>
 
         <div class="panel tab-panel" id="panel-images" data-tab="images" style="display:none">
-          <h3>Biblioteca — Imágenes / GIFs</h3>
-          <input id="imgFile" type="file" accept="image/*">
-          <button id="btn-upload-img">Subir a biblioteca</button>
-          <div id="imagesList" style="margin-top:8px;max-height:56vh;overflow:auto;"></div>
-          <h3 style="margin-top:16px">Imágenes en el canvas</h3>
-          <p class="small">En esta pestaña se activa la selección: arrastra una imagen o redimensiónala desde la esquina inferior derecha.</p>
+          <div class="panel-title"><span class="eyebrow">BIBLIOTECA</span><h2>Imágenes y GIFs</h2></div>
+          <input id="imgFile" type="file" accept=".jpg,.jpeg,.jfif,.png,.gif,.webp,image/jpeg,image/pjpeg,image/png,image/gif,image/webp">
+          <button id="btn-upload-img" type="button">Subir imagen</button>
+          <div id="imagesList" class="library-list"></div>
+          <div class="section-divider"></div>
+          <h3>En el canvas</h3><p class="small">Arrastrá, redimensioná y elegí qué imágenes se ven en el Viewer.</p>
           <div id="canvasImagesList"></div>
         </div>
 
         <div class="panel tab-panel" id="panel-audio" data-tab="audio" style="display:none">
-          <h3>Biblioteca — Audio</h3>
-          <input id="audioFile" type="file" accept="audio/*">
-          <button id="btn-upload-audio">Subir a biblioteca</button>
-          <p class="small">Arrastra un audio de la biblioteca a uno de los números del soundboard.</p>
-          <div id="audioList" style="margin-top:8px;max-height:56vh;overflow:auto;"></div>
+          <div class="panel-title"><span class="eyebrow">BIBLIOTECA</span><h2>Audio</h2></div>
+          <input id="audioFile" type="file" accept=".mp3,.wav,.ogg,.m4a,.aac,.webm,audio/mpeg,audio/wav,audio/ogg,audio/mp4,audio/aac,audio/webm">
+          <button id="btn-upload-audio" type="button">Subir audio</button>
+          <p class="small">Arrastrá un audio a uno de los números del soundboard.</p>
+          <div id="audioList" class="library-list"></div>
         </div>
 
         <div class="panel tab-panel" id="panel-paragraphs" data-tab="paragraphs" style="display:none">
-          <div class="inner-tabs">
-            <button class="inner-tab active" data-text-tab="text">Texto</button>
-            <button class="inner-tab" data-text-tab="timer">Cronómetro</button>
-          </div>
+          <div class="inner-tabs"><button class="inner-tab active" data-text-tab="text">Texto</button><button class="inner-tab" data-text-tab="timer">Cronómetro</button></div>
           <section class="text-section" data-text-tab="text">
-            <h3>Texto</h3>
-            <label>Texto:<textarea id="paraText" placeholder="Escribe aquí tu texto..."></textarea></label>
-            <div class="form-grid">
-              <label>Color <input id="paraColor" type="color" value="#ffffff"></label>
-              <label>Fuente <select id="paraFont"><option value="Arial">Arial</option><option value="Verdana">Verdana</option><option value="Georgia">Georgia</option><option value="Impact">Impact</option><option value="monospace">Monospace</option></select></label>
-            </div>
-            <p class="small">El texto se coloca oculto. En el canvas podés moverlo, redimensionarlo y mostrarlo en el Viewer.</p>
-            <label>Fuente personalizada <input id="fontFile" type="file" accept=".ttf,.otf,.woff,.woff2,font/*"></label>
-            <button id="btn-upload-font" type="button">Subir fuente</button>
+            <div class="panel-title"><span class="eyebrow">OVERLAY</span><h2>Texto</h2></div>
+            <label>Contenido<textarea id="paraText" placeholder="Escribe aquí tu texto..."></textarea></label>
+            <div class="form-grid"><label>Color <input id="paraColor" type="color" value="#ffffff"></label><label>Fuente <select id="paraFont">
+              <option value="Arial">Arial</option><option value="Arial Black">Arial Black</option><option value="Bahnschrift">Bahnschrift</option><option value="Calibri">Calibri</option><option value="Cambria">Cambria</option><option value="Candara">Candara</option><option value="Comic Sans MS">Comic Sans MS</option><option value="Consolas">Consolas</option><option value="Courier New">Courier New</option><option value="Franklin Gothic Medium">Franklin Gothic Medium</option><option value="Georgia">Georgia</option><option value="Impact">Impact</option><option value="Lucida Console">Lucida Console</option><option value="Palatino Linotype">Palatino Linotype</option><option value="Segoe UI">Segoe UI</option><option value="Tahoma">Tahoma</option><option value="Times New Roman">Times New Roman</option><option value="Trebuchet MS">Trebuchet MS</option><option value="Verdana">Verdana</option>
+            </select></label></div>
+            <p class="small">Se añade oculto: preparalo en el canvas y activalo cuando quieras.</p>
             <button id="btn-save-para" type="button">Añadir texto oculto</button>
-            <p class="small">Para añadir fuentes personalizadas, seleccioná el archivo desde <code>C:\Windows\Fonts</code>.</p>
             <div id="paraList" class="canvas-objects"></div>
           </section>
           <section class="text-section" data-text-tab="timer" style="display:none">
-            <h3>Cronómetro</h3>
-            <div class="form-grid"><label>Modo <select id="timerMode"><option value="up">Cuenta hacia adelante</option><option value="down">Cuenta regresiva</option></select></label><label>Duración inicial <input id="timerSeconds" type="number" value="60" min="0"> seg.</label></div>
-            <div class="form-grid"><label>Color <input id="timerColor" type="color" value="#ffffff"></label><label>Tamaño <input id="timerFontSize" type="number" value="56" min="8" max="300"> px</label><label>Fuente <select id="timerFont"></select></label></div>
+            <div class="panel-title"><span class="eyebrow">OVERLAY</span><h2>Cronómetro</h2></div>
+            <div class="form-grid"><label>Modo <select id="timerMode"><option value="up">Cuenta hacia adelante</option><option value="down">Cuenta regresiva</option></select></label><label>Duración <input id="timerSeconds" type="number" value="60" min="0"> seg.</label></div>
+            <div class="form-grid"><label>Color <input id="timerColor" type="color" value="#ffffff"></label><label>Tamaño <input id="timerFontSize" type="number" value="56" min="8" max="300"> px</label><label>Fuente <select id="timerFont">
+              <option value="Arial">Arial</option><option value="Arial Black">Arial Black</option><option value="Bahnschrift">Bahnschrift</option><option value="Calibri">Calibri</option><option value="Cambria">Cambria</option><option value="Candara">Candara</option><option value="Comic Sans MS">Comic Sans MS</option><option value="Consolas">Consolas</option><option value="Courier New">Courier New</option><option value="Franklin Gothic Medium">Franklin Gothic Medium</option><option value="Georgia">Georgia</option><option value="Impact">Impact</option><option value="Lucida Console">Lucida Console</option><option value="Palatino Linotype">Palatino Linotype</option><option value="Segoe UI">Segoe UI</option><option value="Tahoma">Tahoma</option><option value="Times New Roman">Times New Roman</option><option value="Trebuchet MS">Trebuchet MS</option><option value="Verdana">Verdana</option>
+            </select></label></div>
             <div class="form-grid"><label>X <input id="timerX" type="number" value="100" min="0"></label><label>Y <input id="timerY" type="number" value="260" min="0"></label></div>
             <button id="btn-add-timer" type="button">Añadir cronómetro oculto</button>
-            <p class="small">Para añadir fuentes personalizadas, seleccioná el archivo desde <code>C:\Windows\Fonts</code>.</p>
             <div id="timerList" class="canvas-objects"></div>
           </section>
         </div>
 
         <div class="panel tab-panel" id="panel-control" data-tab="control" style="display:none">
-          <h3>Control</h3>
-          <button id="btn-push-state">Push state → Viewer (snapshot)</button>
-          <button id="btn-fetch-state">Fetch state</button>
-          <button id="btn-reset-server">Reset server (dev)</button>
-          <h3 style="margin-top:16px">Vista opcional del stream</h3>
-          <select id="streamPlatform"><option value="twitch">Twitch</option><option value="youtube">YouTube</option><option value="kick">Kick</option></select>
-          <input id="streamSource" type="text" placeholder="Canal o enlace del stream" style="width:100%;box-sizing:border-box;margin-top:6px">
-          <div style="display:flex;gap:8px"><button id="btn-show-stream" type="button">Mostrar como fondo</button><button id="btn-hide-stream" type="button">Ocultar fondo</button></div>
-          <p class="small">Solo aparece en el Editor, sin sonido. Puede tener retraso respecto al directo.</p>
-          <div style="margin-top:8px;color:#9aa6b8;font-size:13px">Pan: mantén clic rueda y arrastra • Zoom: rueda</div>
+          <div class="panel-title"><span class="eyebrow">SISTEMA</span><h2>Configuración</h2></div>
+          <div id="accountSummary" class="status-card">Conectando con tu proyecto…</div>
+          <div id="roomSummary" class="room-card" hidden><span>Sala privada</span><strong id="roomCode">—</strong><small id="realtimeStatus">Conectando…</small></div>
+          <div class="section-divider"></div><h3>Viewer para OBS</h3>
+          <button id="btn-copy-viewer" type="button">Copiar URL del Viewer</button>
+          <button id="btn-rotate-viewer" class="secondary-action owner-only" type="button">Renovar URL del Viewer</button>
+          <p id="viewerUrlStatus" class="small">La URL se muestra una vez al crearla. Guardala en OBS.</p>
+          <div class="section-divider"></div><h3>Canal vinculado</h3>
+          <p id="linkedChannel" class="small">Cargando canal…</p>
+          <div class="button-row"><button id="btn-show-stream" type="button">Mostrar fondo</button><button id="btn-hide-stream" class="secondary-action" type="button">Ocultar</button></div>
+          <p class="small">Solo aparece en el Editor, sin sonido. Los invitados ven únicamente este canal.</p>
+          <label class="toggle-row owner-only"><span>Chat de Twitch en el Editor</span><input id="chatEnabled" type="checkbox"><i aria-hidden="true"></i></label>
+          <div class="section-divider"></div><h3>Invitados</h3>
+          <button id="btn-create-invite" class="owner-only" type="button">Crear invitación de moderador</button>
+          <p id="inviteStatus" class="small">Máximo dos invitados activos por proyecto.</p>
+          <div id="membersList" class="canvas-objects"></div>
+          <div class="section-divider"></div><h3>Actividad reciente</h3>
+          <p class="small">Últimos cambios realizados en esta escena.</p>
+          <div id="activityList" class="activity-list" aria-live="polite"></div>
         </div>
-      </div>
+      </aside>
 
-      <div class="canvaswrap">
-        <div class="stage">
-          <section class="soundboard-overlay" aria-label="Soundboard">
-            <div class="soundboard-actions">
-              <button id="btn-sound-pause" type="button" title="Pausar o reanudar">Ⅱ</button>
-              <button id="btn-sound-stop" type="button" title="Detener">■</button>
-            </div>
-            <div id="soundboard" class="soundboard" aria-label="Soundboard de 0 a 9"></div>
-          </section>
-          <div id="editorViewport">
-            <div id="streamPreview" aria-hidden="true"></div>
-            <canvas id="editorCanvas"></canvas>
-            <div id="imageLayer" aria-hidden="true"></div>
-            <div id="textLayer" aria-hidden="true"></div>
-          </div>
-        </div>
-      </div>
+      <main class="canvaswrap"><div class="stage">
+        <div id="editorViewport"><div id="streamPreview" aria-hidden="true"></div><canvas id="editorCanvas"></canvas><div id="imageLayer" aria-hidden="true"></div><div id="textLayer" aria-hidden="true"></div></div>
+        <div class="canvas-footer"><span>Rueda: zoom</span><span>•</span><span>Mantén clic de rueda: mover canvas</span></div>
+      </div><aside id="twitchChatPanel" class="twitch-chat-panel" hidden><div class="chat-heading"><span>Chat de Twitch</span><button id="btn-close-chat" type="button" title="Ocultar chat">×</button></div><iframe id="twitchChatFrame" title="Chat del canal vinculado"></iframe></aside></main>
     </div>
   </div>
-
   <script type="module" src="/js/editor.js"></script>
 </body>
 </html>

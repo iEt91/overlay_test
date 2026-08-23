@@ -1,7 +1,10 @@
 // viewer.js — Overlay Viewer (canvas + DOM images + audio estable para OBS)
 
 // ----------------------------- WS & DOM refs -----------------------------
-const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+const viewerToken = window.__TANGO_VIEWER_TOKEN__ || new URLSearchParams(location.search).get('viewer_token');
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://')
+  + location.host
+  + `?viewer_token=${encodeURIComponent(viewerToken || '')}`;
 const socket = new WebSocket(WS_URL);
 
 const container = document.getElementById('viewerContainer');
@@ -26,14 +29,6 @@ let WORLD = {
   viewport: { x: 0, y: 0, width: 1920, height: 1080, scale: 1 },
   volume: 1.0
 };
-const loadedFonts = new Set();
-function loadCustomFonts(fonts = []) {
-  fonts.forEach(font => {
-    if (!font || !font.name || !font.url || loadedFonts.has(font.id)) return;
-    loadedFonts.add(font.id);
-    new FontFace(font.name, `url(${font.url})`).load().then(face => document.fonts.add(face)).catch(() => {});
-  });
-}
 
 // ----------------------------- Audio (estable) -----------------------------
 // Subsistema robusto para CEF/OBS: 1 solo AudioContext, 1 solo HTMLAudioElement,
@@ -200,7 +195,6 @@ function handleMessage(msg) {
     case 'snapshot':
       if (msg.state) {
         WORLD = Object.assign({}, WORLD, msg.state);
-        loadCustomFonts((msg.state.assets && msg.state.assets.fonts) || []);
         if (typeof WORLD.volume !== 'number') WORLD.volume = 1.0;
         setMasterVolume(WORLD.volume);
         adjustCanvasToViewport();
@@ -268,9 +262,6 @@ function handleMessage(msg) {
     case 'volume:update':
       WORLD.volume = (msg.payload && typeof msg.payload.volume === 'number') ? msg.payload.volume : WORLD.volume;
       handleVolumeUpdate({ volume: WORLD.volume });
-      break;
-    case 'assets:update':
-      if (msg.payload && msg.payload.fonts) loadCustomFonts(msg.payload.fonts);
       break;
 
     default:

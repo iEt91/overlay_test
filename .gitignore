@@ -1,0 +1,14 @@
+# Credenciales y configuración privada
+.env
+.env.*
+!.env.example
+
+# Sesiones locales y datos temporales
+data/
+*.log
+
+# Dependencias
+node_modules/
+
+# Archivos que suben los usuarios (no forman parte del código)
+public/uploads/

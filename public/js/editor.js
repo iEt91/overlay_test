@@ -7,34 +7,55 @@ document.addEventListener('DOMContentLoaded', () => {
     socket.addEventListener('open', () => {
       socket.send(JSON.stringify({ type: 'hello', role: 'editor' }));
       console.log('WS editor connected');
+      updateRealtimeStatus('Conectando a la sala…');
     });
+
+    socket.addEventListener('close', (event) => {
+      const code = event && event.code ? ` (código ${event.code})` : '';
+      updateRealtimeStatus(`Sin conexión en tiempo real${code}`, true);
+    });
+    socket.addEventListener('error', () => updateRealtimeStatus('Error de conexión en tiempo real', true));
 
     socket.addEventListener('message', (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === 'snapshot' && msg.state) {
+        if (msg.type === 'room:connected' && msg.payload) {
+          updateRealtimeStatus(`En tiempo real · Sala ${msg.payload.roomCode || 'privada'}`);
+        } else if (msg.type === 'snapshot' && msg.state) {
           if (msg.state.assets) {
-            STATE.assets = { images: [], audio: [], fonts: [], ...msg.state.assets };
+            STATE.assets = { images: [], audio: [], ...msg.state.assets };
             updateImagesLibraryUI();
             updateAudioLibraryUI();
-            updateFontOptions(); loadCustomFonts(STATE.assets.fonts);
           }
           if (msg.state.images) STATE.images = msg.state.images.map(img => ({ ...img, viewerVisible: img.viewerVisible !== false && img.visible !== false }));
-          if (msg.state.strokes) STATE.strokes = msg.state.strokes;
-          if (msg.state.texts) STATE.texts = msg.state.texts;
-          if (msg.state.timers) STATE.timers = msg.state.timers;
-          if (msg.state.audio) STATE.audio = { current: null, playlist: [], slots: {}, ...msg.state.audio };
-          if (typeof msg.state.volume === 'number') STATE.volume = msg.state.volume;
+          // Clonamos los datos recibidos: cada navegador conserva su propia
+          // representación y siempre vuelve al estado canónico del proyecto.
+          if (msg.state.strokes) STATE.strokes = msg.state.strokes.map(stroke => ({ ...stroke, points: (stroke.points || []).map(point => ({ ...point })) }));
+          if (msg.state.texts) STATE.texts = msg.state.texts.map(text => ({ ...text }));
+          if (msg.state.timers) STATE.timers = msg.state.timers.map(timer => ({ ...timer }));
+          if (msg.state.audio) {
+            STATE.audio = { current: null, playlist: [], slots: {}, ...msg.state.audio };
+            updateAudioLibraryUI();
+          }
+          if (typeof msg.state.volume === 'number') {
+            STATE.volume = msg.state.volume;
+            setLocalVolume(STATE.volume);
+            if (masterVolumeEl) masterVolumeEl.value = Math.round(STATE.volume * 100);
+          }
           updateCanvasImagesUI();
           updateSoundboardUI();
           updateTextList(); updateTimerList();
+          redraw();
+        } else if (msg.type === 'project:settings' && msg.payload && PROJECT_INFO) {
+          renderProjectInfo({ ...PROJECT_INFO, project: { ...PROJECT_INFO.project, ...msg.payload } });
         } else if (msg.type === 'assets:update') {
-          STATE.assets = { images: [], audio: [], fonts: [], ...(msg.payload || STATE.assets) };
+          STATE.assets = { images: [], audio: [], ...(msg.payload || STATE.assets) };
           updateImagesLibraryUI();
           updateAudioLibraryUI();
-          updateFontOptions(); loadCustomFonts(STATE.assets.fonts);
         } else if (msg.type === 'audio:stop') {
+          STATE.audio.current = null;
           stopAllLocalAudio();
+          updateSoundboardUI();
         } else if (msg.type === 'volume:update') {
           STATE.volume = msg.payload && msg.payload.volume != null ? msg.payload.volume : STATE.volume;
           setLocalVolume(STATE.volume);
@@ -47,7 +68,38 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (msg.type === 'image:remove' && msg.payload) {
           STATE.images = STATE.images.filter(img => img.id !== msg.payload.id);
           updateCanvasImagesUI(); redraw();
+        } else if (msg.type === 'image:add' && msg.payload && !STATE.images.some(img => img.id === msg.payload.id)) {
+          STATE.images.push({ ...msg.payload, viewerVisible: msg.payload.viewerVisible !== false && msg.payload.visible !== false });
+          if (!imageCache.has(msg.payload.url)) {
+            const image = new Image(); image.crossOrigin = 'anonymous'; image.src = msg.payload.url; imageCache.set(msg.payload.url, image);
+          }
+          updateCanvasImagesUI(); redraw();
+        } else if (msg.type === 'stroke:start' && msg.payload && msg.payload.id) {
+          if (!STATE.strokes.some(stroke => stroke.id === msg.payload.id)) {
+            STATE.strokes.push({ ...msg.payload, points: [...(msg.payload.points || [])] });
+          }
+          redraw();
+        } else if (msg.type === 'stroke:point' && msg.payload && msg.payload.id && msg.payload.point) {
+          const stroke = STATE.strokes.find(item => item.id === msg.payload.id);
+          if (stroke) {
+            const lastPoint = stroke.points[stroke.points.length - 1];
+            const point = msg.payload.point;
+            if (!lastPoint || lastPoint.x !== point.x || lastPoint.y !== point.y) stroke.points.push(point);
+          }
+          redraw();
+        } else if (msg.type === 'stroke:end') {
+          redraw();
+        } else if (msg.type === 'audio:trigger' && msg.payload) {
+          STATE.audio.current = msg.payload;
+          updateSoundboardUI();
+        } else if (msg.type === 'audio:pause') {
+          if (STATE.audio.current) STATE.audio.current.paused = true;
+          updateSoundboardUI();
+        } else if (msg.type === 'audio:resume') {
+          STATE.audio.current = { ...(STATE.audio.current || {}), ...(msg.payload || {}), paused: false };
+          updateSoundboardUI();
         }
+        scheduleActivityRefresh();
       } catch (e) { console.warn('ws parse', e); }
     });
 
@@ -58,6 +110,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const brushColorEl = document.getElementById('brushColor');
     const brushSizeEl = document.getElementById('brushSize');
+    const brushColorLabel = document.getElementById('brushColorLabel');
+    const brushSizeValue = document.getElementById('brushSizeValue');
     const btnClearLocal = document.getElementById('btn-clear-local');
     const btnPush = document.getElementById('btn-push-state');
     const btnFetchState = document.getElementById('btn-fetch-state');
@@ -77,14 +131,28 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnUndo = document.getElementById('btn-undo');
     const btnClean = document.getElementById('btn-clean');
     const streamPreview = document.getElementById('streamPreview');
-    const streamPlatform = document.getElementById('streamPlatform');
-    const streamSource = document.getElementById('streamSource');
     const btnShowStream = document.getElementById('btn-show-stream');
     const btnHideStream = document.getElementById('btn-hide-stream');
+    const accountSummary = document.getElementById('accountSummary');
+    const linkedChannel = document.getElementById('linkedChannel');
+    const viewerUrlStatus = document.getElementById('viewerUrlStatus');
+    const btnCopyViewer = document.getElementById('btn-copy-viewer');
+    const btnRotateViewer = document.getElementById('btn-rotate-viewer');
+    const btnOverlayVisibility = document.getElementById('btn-overlay-visibility');
+    const chatEnabled = document.getElementById('chatEnabled');
+    const twitchChatPanel = document.getElementById('twitchChatPanel');
+    const twitchChatFrame = document.getElementById('twitchChatFrame');
+    const btnCloseChat = document.getElementById('btn-close-chat');
+    const btnCreateInvite = document.getElementById('btn-create-invite');
+    const inviteStatus = document.getElementById('inviteStatus');
+    const membersList = document.getElementById('membersList');
+    const activityList = document.getElementById('activityList');
+    const roomSummary = document.getElementById('roomSummary');
+    const roomCode = document.getElementById('roomCode');
+    const realtimeStatus = document.getElementById('realtimeStatus');
     const paraText = document.getElementById('paraText');
     const paraColor = document.getElementById('paraColor');
     const paraFont = document.getElementById('paraFont');
-    const fontFile = document.getElementById('fontFile'); const btnUploadFont = document.getElementById('btn-upload-font');
     const btnSavePara = document.getElementById('btn-save-para'); const paraList = document.getElementById('paraList');
     const timerMode = document.getElementById('timerMode'); const timerSeconds = document.getElementById('timerSeconds');
     const timerColor = document.getElementById('timerColor'); const timerFontSize = document.getElementById('timerFontSize'); const timerFont = document.getElementById('timerFont');
@@ -102,10 +170,19 @@ document.addEventListener('DOMContentLoaded', () => {
       texts: [],
       timers: [],
       audio: { current: null, playlist: [], slots: {} },
-      assets: { images: [], audio: [], fonts: [] },
+      assets: { images: [], audio: [] },
       viewport: { x: 0, y: 0, width: 1920, height: 1080, scale: 1 },
       volume: 1.0
     };
+    let PROJECT_INFO = null;
+    let latestViewerUrl = null;
+    let activityRefreshTimer = null;
+
+    function updateRealtimeStatus(message, offline = false) {
+      if (!realtimeStatus || !roomSummary) return;
+      realtimeStatus.textContent = message;
+      roomSummary.classList.toggle('is-offline', offline);
+    }
 
     // tools
     let tool = 'brush';
@@ -115,8 +192,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     setTool('brush');
 
+    function updateBrushControls() {
+      if (brushColorLabel) brushColorLabel.textContent = brushColorEl.value.toUpperCase();
+      if (brushSizeValue) brushSizeValue.textContent = `${brushSizeEl.value} px`;
+    }
+    brushColorEl.addEventListener('input', updateBrushControls);
+    brushSizeEl.addEventListener('input', updateBrushControls);
+    document.querySelectorAll('.swatch-row [data-color]').forEach(swatch => swatch.addEventListener('click', () => {
+      brushColorEl.value = swatch.dataset.color;
+      updateBrushControls();
+    }));
+    updateBrushControls();
+
     // transform/pan/zoom
     let transform = { scale: 1, tx: 0, ty: 0 };
+    let initialCanvasFit = false;
     function syncStreamPreviewToCanvas() {
       // El stream ocupa el mundo 1920×1080: así sigue exactamente la zona segura.
       streamPreview.style.left = `${-transform.tx * transform.scale}px`;
@@ -135,6 +225,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function fitCanvas() {
       const rect = viewportWrap.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
       canvas.style.width = rect.width + 'px';
       canvas.style.height = rect.height + 'px';
       imageLayer.style.width = rect.width + 'px';
@@ -143,6 +234,13 @@ document.addEventListener('DOMContentLoaded', () => {
       canvas.width = Math.floor(rect.width * ratio);
       canvas.height = Math.floor(rect.height * ratio);
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      if (!initialCanvasFit) {
+        const scale = Math.min(rect.width / 1920, rect.height / 1080) * 0.86;
+        transform.scale = scale;
+        transform.tx = (1920 - rect.width / scale) / 2;
+        transform.ty = (1080 - rect.height / scale) / 2;
+        initialCanvasFit = true;
+      }
       redraw();
     }
     window.addEventListener('resize', fitCanvas);
@@ -152,65 +250,168 @@ document.addEventListener('DOMContentLoaded', () => {
     function screenToWorld(p) { return { x: p.x / transform.scale + transform.tx, y: p.y / transform.scale + transform.ty }; }
     function generateId() { return Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6).toString(36); }
     function isGifUrl(url) { return /\.gif(\?.*)?$/i.test(url); }
-    const loadedFonts = new Set();
-    function loadCustomFonts(fonts = []) {
-      fonts.forEach(font => {
-        if (!font || !font.name || !font.url || loadedFonts.has(font.id)) return;
-        loadedFonts.add(font.id);
-        new FontFace(font.name, `url(${font.url})`).load().then(face => { document.fonts.add(face); redraw(); }).catch(() => {});
-      });
-    }
-    function updateFontOptions() {
-      const current = paraFont.value;
-      const options = ['Arial', 'Verdana', 'Georgia', 'Impact', 'monospace', ...(STATE.assets.fonts || []).map(font => font.name)];
-      paraFont.innerHTML = ''; timerFont.innerHTML = '';
-      [...new Set(options)].forEach(name => { const option = new Option(name, name); paraFont.add(option); timerFont.add(new Option(name, name)); });
-      paraFont.value = options.includes(current) ? current : 'Arial'; timerFont.value = paraFont.value;
-    }
-    function streamEmbedUrl(platform, source) {
-      const value = source.trim().replace(/\/$/, '');
-      if (!value) return null;
-      if (platform === 'twitch') {
-        const channel = value.replace(/^https?:\/\/(www\.)?twitch\.tv\//i, '').split(/[/?#]/)[0];
-        return channel ? `https://player.twitch.tv/?channel=${encodeURIComponent(channel)}&parent=${encodeURIComponent(location.hostname)}&muted=true&autoplay=true` : null;
-      }
-      if (platform === 'kick') {
-        const channel = value.replace(/^https?:\/\/(www\.)?kick\.com\//i, '').split(/[/?#]/)[0];
-        return channel ? `https://player.kick.com/${encodeURIComponent(channel)}?autoplay=true&muted=true&allowfullscreen=false` : null;
-      }
-      let videoId = value;
-      try {
-        const url = new URL(value);
-        videoId = url.searchParams.get('v') || url.pathname.split('/').filter(Boolean).pop();
-      } catch (_) {}
-      return videoId ? `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&mute=1&controls=0&playsinline=1` : null;
-    }
     function showStreamPreview() {
-      const src = streamEmbedUrl(streamPlatform.value, streamSource.value);
-      if (!src) { alert('Escribí el canal o enlace del stream'); return; }
+      const channel = PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.twitch_channel_login;
+      if (!channel) { alert('Todavía no se pudo cargar el canal vinculado.'); return; }
       streamPreview.innerHTML = '';
-      if (streamPlatform.value === 'twitch') {
-        const channel = streamSource.value.trim().replace(/^https?:\/\/(www\.)?twitch\.tv\//i, '').split(/[/?#]/)[0];
-        const playerHost = document.createElement('div'); playerHost.id = 'twitch-background-player'; streamPreview.appendChild(playerHost);
-        streamPreview.style.display = 'flex'; setStreamInteraction(true);
-        const createPlayer = () => {
-          const player = new window.Twitch.Player(playerHost.id, {
-            width: '100%', height: '100%', channel, parent: [location.hostname], autoplay: true, muted: true
-          });
-          player.addEventListener(window.Twitch.Player.READY, () => { player.setMuted(true); player.play(); });
-        };
-        if (window.Twitch && window.Twitch.Player) createPlayer();
-        else {
-          const script = document.createElement('script'); script.src = 'https://player.twitch.tv/js/embed/v1.js'; script.onload = createPlayer; document.head.appendChild(script);
-        }
-        return;
+      const playerHost = document.createElement('div'); playerHost.id = 'twitch-background-player'; streamPreview.appendChild(playerHost);
+      streamPreview.style.display = 'flex'; setStreamInteraction(true);
+      const createPlayer = () => {
+        const player = new window.Twitch.Player(playerHost.id, {
+          width: '100%', height: '100%', channel, parent: [location.hostname], autoplay: true, muted: true
+        });
+        player.addEventListener(window.Twitch.Player.READY, () => { player.setMuted(true); player.play(); });
+      };
+      if (window.Twitch && window.Twitch.Player) createPlayer();
+      else {
+        const script = document.createElement('script'); script.src = 'https://player.twitch.tv/js/embed/v1.js'; script.onload = createPlayer; document.head.appendChild(script);
       }
-      const iframe = document.createElement('iframe'); iframe.src = src; iframe.allow = 'autoplay; fullscreen'; iframe.title = 'Vista previa del stream';
-      streamPreview.appendChild(iframe); streamPreview.style.display = 'flex'; setStreamInteraction(true);
     }
     function setStreamInteraction(enabled) {
       // Solo Configuración deja el reproductor por encima para poder usar sus controles.
       streamPreview.classList.toggle('interactive', Boolean(enabled && streamPreview.children.length));
+    }
+    async function apiRequest(url, options = {}) {
+      const response = await fetch(url, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        ...options
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || 'No se pudo completar la acción.');
+      }
+      return response.status === 204 ? null : response.json();
+    }
+    function setChatVisibility(enabled) {
+      if (!twitchChatPanel) return;
+      const channel = PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.twitch_channel_login;
+      twitchChatPanel.hidden = !enabled || !channel;
+      if (enabled && channel && twitchChatFrame && !twitchChatFrame.src) {
+        twitchChatFrame.src = `https://www.twitch.tv/embed/${encodeURIComponent(channel)}/chat?parent=${encodeURIComponent(location.hostname)}&darkpopout`;
+      }
+    }
+    function setOverlayVisibility(enabled) {
+      if (!btnOverlayVisibility) return;
+      const visible = enabled !== false;
+      btnOverlayVisibility.dataset.overlayVisible = String(visible);
+      btnOverlayVisibility.setAttribute('aria-pressed', String(visible));
+      const action = visible ? 'Ocultar overlay en el Viewer' : 'Restaurar overlay en el Viewer';
+      btnOverlayVisibility.setAttribute('aria-label', action);
+      btnOverlayVisibility.title = action;
+    }
+    function renderProjectInfo(payload) {
+      PROJECT_INFO = payload;
+      const project = payload.project;
+      const owner = payload.role === 'owner';
+      if (accountSummary) accountSummary.textContent = `@${payload.user.login} · ${owner ? 'streamer propietario' : 'invitado del proyecto'}`;
+      if (roomSummary && roomCode && project.id) {
+        roomCode.textContent = `#${String(project.id).slice(-8).toUpperCase()}`;
+        roomSummary.hidden = false;
+      }
+      if (linkedChannel) linkedChannel.textContent = `Canal bloqueado: twitch.tv/${project.twitch_channel_login}`;
+      document.querySelectorAll('.owner-only').forEach(el => { el.style.display = owner ? '' : 'none'; });
+      if (chatEnabled) chatEnabled.checked = Boolean(project.chat_enabled);
+      if (payload.viewerUrl) {
+        latestViewerUrl = payload.viewerUrl;
+        if (viewerUrlStatus) viewerUrlStatus.textContent = 'Tu URL privada está lista para copiar en OBS.';
+      } else if (viewerUrlStatus && !latestViewerUrl) {
+        viewerUrlStatus.textContent = owner
+          ? 'La URL se muestra al crearla o al renovarla. Renovarla invalida la anterior.'
+          : 'El streamer propietario administra la URL privada del Viewer.';
+      }
+      setChatVisibility(Boolean(project.chat_enabled));
+      setOverlayVisibility(project.overlay_enabled);
+    }
+    async function loadProjectInfo() {
+      try {
+        renderProjectInfo(await apiRequest('/api/project'));
+        await Promise.all([loadMembers(), loadActivity()]);
+      }
+      catch (error) { if (accountSummary) accountSummary.textContent = error.message; }
+    }
+    function renderMembers(members) {
+      if (!membersList) return;
+      membersList.innerHTML = '';
+      members.filter(member => member.active).forEach(member => {
+        const row = document.createElement('div'); row.className = 'canvas-object';
+        const name = document.createElement('span'); name.className = 'object-name';
+        name.textContent = member.role === 'owner'
+          ? `Streamer: @${member.user?.login || member.member_twitch_id}`
+          : `Invitado: @${member.user?.login || member.member_twitch_id}`;
+        row.appendChild(name);
+        if (PROJECT_INFO?.role === 'owner' && member.role === 'editor') {
+          const remove = document.createElement('button'); remove.className = 'remove'; remove.type = 'button'; remove.textContent = '×'; remove.title = 'Quitar invitado';
+          remove.addEventListener('click', async () => {
+            try { await apiRequest(`/api/project/members/${encodeURIComponent(member.member_twitch_id)}`, { method: 'DELETE' }); await loadMembers(); }
+            catch (error) { alert(error.message); }
+          });
+          row.appendChild(remove);
+        }
+        membersList.appendChild(row);
+      });
+    }
+    async function loadMembers() {
+      try { const result = await apiRequest('/api/project/members'); renderMembers(result.members || []); }
+      catch (_) { if (membersList) membersList.innerHTML = '<p class="small">No se pudo cargar los invitados.</p>'; }
+    }
+    const activityLabels = {
+      'project.created': 'creó el proyecto',
+      'member.invite_created': 'creó una invitación de moderador',
+      'member.invite_accepted': 'aceptó una invitación',
+      'member.removed': 'quitó a un invitado',
+      'overlay.panic_enabled': 'ocultó todo el overlay',
+      'overlay.restored': 'restauró el overlay',
+      'project.settings_updated': 'cambió la configuración',
+      'scene.saved': 'guardó la escena',
+      'stroke.end': 'dibujó un trazo',
+      'image.add': 'añadió una imagen al canvas',
+      'image.update': 'modificó una imagen',
+      'image.remove': 'eliminó una imagen del canvas',
+      'asset.image.add': 'subió una imagen a la biblioteca',
+      'asset.image.delete': 'eliminó una imagen de la biblioteca',
+      'asset.audio.add': 'subió un audio a la biblioteca',
+      'asset.audio.delete': 'eliminó un audio de la biblioteca',
+      'text.add': 'añadió un texto',
+      'text.update': 'modificó un texto',
+      'text.remove': 'eliminó un texto',
+      'timer.add': 'añadió un cronómetro',
+      'timer.update': 'modificó un cronómetro',
+      'timer.remove': 'eliminó un cronómetro',
+      'audio.trigger': 'reprodujo un sonido',
+      'audio.stop': 'detuvo el sonido',
+      'audio.pause': 'pausó el sonido',
+      'audio.resume': 'reanudó el sonido'
+    };
+    function renderActivity(events) {
+      if (!activityList) return;
+      activityList.innerHTML = '';
+      if (!events.length) {
+        activityList.innerHTML = '<p class="activity-empty">Todavía no hay cambios registrados.</p>';
+        return;
+      }
+      events.forEach(event => {
+        const row = document.createElement('div'); row.className = 'activity-item';
+        const description = document.createElement('strong');
+        const actor = event.actor?.login ? `@${event.actor.login}` : 'Sistema';
+        description.textContent = `${actor} ${activityLabels[event.action] || event.action}`;
+        const timestamp = document.createElement('span');
+        timestamp.textContent = new Intl.DateTimeFormat('es-AR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(event.createdAt));
+        row.append(description, timestamp);
+        activityList.appendChild(row);
+      });
+    }
+    async function loadActivity() {
+      try { const result = await apiRequest('/api/project/audit'); renderActivity(result.events || []); }
+      catch (_) { if (activityList) activityList.innerHTML = '<p class="activity-empty">No se pudo cargar la actividad.</p>'; }
+    }
+    function scheduleActivityRefresh() {
+      clearTimeout(activityRefreshTimer);
+      activityRefreshTimer = setTimeout(loadActivity, 1800);
+    }
+    async function copyViewerUrl() {
+      if (!latestViewerUrl) { alert('La URL no está disponible en esta sesión. Si sos el streamer, podés renovarla para generar una nueva.'); return; }
+      try { await navigator.clipboard.writeText(latestViewerUrl); if (viewerUrlStatus) viewerUrlStatus.textContent = 'URL copiada. Pegala como fuente de navegador en OBS.'; }
+      catch (_) { alert('No se pudo copiar automáticamente.'); }
     }
     function publishSnapshot() {
       try { socket.send(JSON.stringify({ type: 'snapshot', payload: STATE })); } catch (e) {}
@@ -323,8 +524,6 @@ document.addEventListener('DOMContentLoaded', () => {
           const dy = (panStart.y - e.clientY) / transform.scale;
           transform.tx = panStartTransform.tx + dx;
           transform.ty = panStartTransform.ty + dy;
-          STATE.viewport.scale = transform.scale;
-          try { socket.send(JSON.stringify({ type:'viewport:update', payload: STATE.viewport })); } catch(e){}
           redraw();
           return;
         }
@@ -409,9 +608,7 @@ document.addEventListener('DOMContentLoaded', () => {
         transform.scale = Math.max(0.05, transform.scale * (1 + delta));
         const worldAfter = screenToWorld(mouse);
         transform.tx += worldBefore.x - worldAfter.x; transform.ty += worldBefore.y - worldAfter.y;
-        STATE.viewport.scale = transform.scale;
-        try { socket.send(JSON.stringify({ type:'viewport:update', payload: STATE.viewport })); } catch(e){}
-        redraw();
+          redraw();
       } catch (err) { console.error('wheel err', err); }
     }, { passive:false });
 
@@ -428,10 +625,10 @@ document.addEventListener('DOMContentLoaded', () => {
           if (!isGifUrl(img.url)) drawImageOnCanvas(img);
         }
 
-        // draw strokes
-        for (const s of STATE.strokes) drawStroke(s);
+        // Texto sobre las imágenes; pincel por encima de todo.
         for (const text of STATE.texts) drawText(text);
         for (const timer of STATE.timers) drawTimer(timer);
+        for (const s of STATE.strokes) drawStroke(s);
 
         // selection overlay for selected image
         if (selectedImageId) {
@@ -451,8 +648,7 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.fillStyle = 'rgba(2,6,18,.94)';
             ctx.fillRect(sPos.x + sW + 6, sPos.y - 30, 26, 26);
             ctx.strokeStyle = '#00ffcc'; ctx.strokeRect(sPos.x + sW + 6, sPos.y - 30, 26, 26);
-            ctx.fillStyle = '#e6eef6'; ctx.font = '15px sans-serif';
-            ctx.fillText(img.viewerVisible === false ? '○' : '◉', sPos.x + sW + 11, sPos.y - 11);
+            drawVisibilityIcon(sPos.x + sW + 6, sPos.y - 30, img.viewerVisible !== false);
             ctx.restore();
           }
         }
@@ -585,7 +781,18 @@ document.addEventListener('DOMContentLoaded', () => {
       ctx.fillStyle = '#071826'; ctx.font = '16px sans-serif'; ctx.fillText('↘', box.x + box.width - 21, box.y + box.height - 6);
       ctx.fillStyle = 'rgba(2,6,18,.94)'; ctx.fillRect(box.x + box.width + 6, box.y - 30, 26, 26);
       ctx.strokeStyle = '#00ffcc'; ctx.strokeRect(box.x + box.width + 6, box.y - 30, 26, 26);
-      ctx.fillStyle = '#e6eef6'; ctx.font = '15px sans-serif'; ctx.fillText(visible ? '◉' : '○', box.x + box.width + 11, box.y - 11);
+      drawVisibilityIcon(box.x + box.width + 6, box.y - 30, visible);
+      ctx.restore();
+    }
+    function drawVisibilityIcon(x, y, visible) {
+      ctx.save();
+      ctx.strokeStyle = '#e6eef6'; ctx.fillStyle = '#e6eef6'; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.ellipse(x + 13, y + 13, 8.5, 5.5, 0, 0, Math.PI * 2); ctx.stroke();
+      if (visible) {
+        ctx.beginPath(); ctx.arc(x + 13, y + 13, 2.6, 0, Math.PI * 2); ctx.fill();
+      } else {
+        ctx.beginPath(); ctx.moveTo(x + 5, y + 5); ctx.lineTo(x + 21, y + 21); ctx.stroke();
+      }
       ctx.restore();
     }
     function getTimerDisplay(item) {
@@ -627,7 +834,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btnFetchState && btnFetchState.addEventListener('click', async () => {
       try {
         const r = await fetch('/state'); const j = await r.json();
-        STATE = j.state; STATE.audio = { current: null, playlist: [], slots: {}, ...STATE.audio }; STATE.images = (STATE.images || []).map(img => ({ ...img, viewerVisible: img.viewerVisible !== false && img.visible !== false })); STATE.viewport.x=0; STATE.viewport.y=0; STATE.viewport.width=1920; STATE.viewport.height=1080; updateCanvasImagesUI(); updateSoundboardUI(); updateTextList(); updateTimerList(); redraw();
+        STATE = j.state; STATE.audio = { current: null, playlist: [], slots: {}, ...STATE.audio }; STATE.images = (STATE.images || []).map(img => ({ ...img, viewerVisible: img.viewerVisible !== false && img.visible !== false })); STATE.viewport.x=0; STATE.viewport.y=0; STATE.viewport.width=1920; STATE.viewport.height=1080; updateAudioLibraryUI(); updateCanvasImagesUI(); updateSoundboardUI(); updateTextList(); updateTimerList(); redraw();
       } catch(e){ console.error('fetch state err', e); }
     });
 
@@ -636,8 +843,35 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     btnShowStream && btnShowStream.addEventListener('click', showStreamPreview);
     btnHideStream && btnHideStream.addEventListener('click', () => { streamPreview.innerHTML = ''; streamPreview.style.display = 'none'; setStreamInteraction(false); });
-    streamPlatform && streamPlatform.addEventListener('change', () => {
-      streamSource.placeholder = streamPlatform.value === 'youtube' ? 'Enlace del directo o video de YouTube' : 'Canal o enlace del stream';
+    btnCopyViewer && btnCopyViewer.addEventListener('click', copyViewerUrl);
+    btnRotateViewer && btnRotateViewer.addEventListener('click', async () => {
+      try {
+        const result = await apiRequest('/api/project/viewer-token', { method: 'POST' });
+        latestViewerUrl = result.viewerUrl;
+        await copyViewerUrl();
+      } catch (error) { alert(error.message); }
+    });
+    btnOverlayVisibility && btnOverlayVisibility.addEventListener('click', async () => {
+      if (!PROJECT_INFO) return;
+      const visible = !PROJECT_INFO || PROJECT_INFO.project.overlay_enabled !== false;
+      try {
+        await apiRequest(visible ? '/api/project/panic' : '/api/project/restore', { method: 'POST' });
+        renderProjectInfo({ ...PROJECT_INFO, project: { ...PROJECT_INFO.project, overlay_enabled: !visible } });
+      } catch (error) { alert(error.message); }
+    });
+    chatEnabled && chatEnabled.addEventListener('change', async () => {
+      try {
+        const result = await apiRequest('/api/project/settings', { method: 'PATCH', body: JSON.stringify({ chatEnabled: chatEnabled.checked }) });
+        renderProjectInfo({ ...PROJECT_INFO, project: { ...PROJECT_INFO.project, ...result.project } });
+      } catch (error) { chatEnabled.checked = !chatEnabled.checked; alert(error.message); }
+    });
+    btnCloseChat && btnCloseChat.addEventListener('click', () => { if (twitchChatPanel) twitchChatPanel.hidden = true; });
+    btnCreateInvite && btnCreateInvite.addEventListener('click', async () => {
+      try {
+        const result = await apiRequest('/api/project/invites', { method: 'POST' });
+        await navigator.clipboard.writeText(result.inviteUrl);
+        if (inviteStatus) inviteStatus.textContent = `Invitación copiada. Vence en ${result.expiresInDays} días.`;
+      } catch (error) { alert(error.message); }
     });
 
     // Upload image -> library
@@ -645,9 +879,10 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         if (!imgFile.files || imgFile.files.length===0) { alert('Selecciona un archivo'); return; }
         const f = imgFile.files[0]; const form = new FormData(); form.append('file', f);
-        const r = await fetch('/upload', { method:'POST', body: form });
-        const j = await r.json();
-        if (!j || !j.url) { alert('Error: servidor no devolvió URL'); return; }
+        if (f.size > 25 * 1024 * 1024) { alert('La imagen supera el límite de 25 MB.'); return; }
+        const r = await fetch('/upload/image', { method:'POST', body: form });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.url) throw new Error(j.error || 'El servidor no pudo subir la imagen.');
         const url = j.url;
         const asset = { id: generateId(), url, name: f.name };
         STATE.assets.images.push(asset);
@@ -655,7 +890,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!imageCache.has(url)) { const im = new Image(); im.crossOrigin='anonymous'; im.src = url; imageCache.set(url,im); }
         try { socket.send(JSON.stringify({ type:'asset:image:add', payload: asset })); } catch(e){}
         updateImagesLibraryUI();
-      } catch (e) { console.error('upload img err', e); alert('Error subiendo imagen'); }
+      } catch (e) { console.error('upload img err', e); alert(e.message || 'Error subiendo imagen'); }
     });
 
     // Upload audio -> library
@@ -663,15 +898,16 @@ document.addEventListener('DOMContentLoaded', () => {
       try {
         if (!audioFile.files || audioFile.files.length===0) { alert('Selecciona un archivo'); return; }
         const f = audioFile.files[0]; const form = new FormData(); form.append('file', f);
-        const r = await fetch('/upload', { method:'POST', body: form });
-        const j = await r.json();
-        if (!j || !j.url) { alert('Error: servidor no devolvió URL'); return; }
+        if (f.size > 25 * 1024 * 1024) { alert('El audio supera el límite de 25 MB.'); return; }
+        const r = await fetch('/upload/audio', { method:'POST', body: form });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || !j.url) throw new Error(j.error || 'El servidor no pudo subir el audio.');
         const url = j.url;
         const asset = { id: generateId(), url, name: f.name };
         STATE.assets.audio.push(asset);
         try { socket.send(JSON.stringify({ type:'asset:audio:add', payload: asset })); } catch(e){}
         updateAudioLibraryUI();
-      } catch (e) { console.error('upload audio err', e); alert('Error subiendo audio'); }
+      } catch (e) { console.error('upload audio err', e); alert(e.message || 'Error subiendo audio'); }
     });
 
     // master volume control
@@ -683,7 +919,11 @@ document.addEventListener('DOMContentLoaded', () => {
     btnSoundStop && btnSoundStop.addEventListener('click', stopSoundboard);
     btnSoundPause && btnSoundPause.addEventListener('click', toggleSoundboard);
     window.addEventListener('keydown', (event) => {
-      if (event.repeat || event.ctrlKey || event.altKey || event.metaKey || ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+      const isTyping = ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName);
+      if (!isTyping && (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'z') {
+        event.preventDefault(); btnUndo && btnUndo.click(); return;
+      }
+      if (event.repeat || event.ctrlKey || event.altKey || event.metaKey || isTyping) return;
       if (/^[0-9]$/.test(event.key)) { event.preventDefault(); playSoundSlot(event.key); }
     });
 
@@ -692,20 +932,6 @@ document.addEventListener('DOMContentLoaded', () => {
       document.querySelectorAll('.inner-tab').forEach(tab => tab.classList.toggle('active', tab === button));
       document.querySelectorAll('.text-section').forEach(section => section.style.display = section.dataset.textTab === target ? '' : 'none');
     }));
-    btnUploadFont && btnUploadFont.addEventListener('click', async () => {
-      const file = fontFile.files && fontFile.files[0];
-      if (!file) { alert('Selecciona una fuente .ttf, .otf, .woff o .woff2'); return; }
-      const form = new FormData(); form.append('file', file);
-      try {
-        const response = await fetch('/upload', { method: 'POST', body: form }); const result = await response.json();
-        if (!result.url) throw new Error('No se recibió URL');
-        const name = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'Fuente personalizada';
-        const font = { id: generateId(), name, url: result.url };
-        STATE.assets.fonts.push(font); loadCustomFonts([font]); updateFontOptions();
-        try { socket.send(JSON.stringify({ type: 'asset:font:add', payload: font })); } catch(e) {}
-        paraFont.value = name; timerFont.value = name;
-      } catch (error) { console.error(error); alert('No se pudo subir la fuente'); }
-    });
     btnSavePara && btnSavePara.addEventListener('click', () => {
       if (!paraText.value.trim()) { alert('Escribe un texto primero'); return; }
       const item = { id: generateId(), text: paraText.value, color: paraColor.value, size: 48, font: paraFont.value, x: 100, y: 180, viewerVisible: false };
@@ -806,15 +1032,24 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateAudioLibraryUI() {
       audioList.innerHTML = '';
       STATE.assets.audio.forEach(a => {
+        const slots = Object.entries(STATE.audio.slots || {})
+          .filter(([, assigned]) => assigned && (assigned.id === a.id || assigned.url === a.url))
+          .map(([slot]) => slot);
+        const slotLabel = slots.length ? `Slot${slots.length > 1 ? 's' : ''}: ${slots.join(', ')}` : 'Sin asignar';
         const el = document.createElement('div'); el.className='lib-item'; el.style.padding='6px'; el.style.borderBottom='1px solid rgba(255,255,255,0.03)';
         el.draggable = true;
         el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;">
           <div style="flex:1;overflow:hidden"><small>${a.name}</small></div>
-          <small class="small">Arrastrar</small>
+          <small class="audio-slot-label">${slotLabel}</small>
         </div>`;
         audioList.appendChild(el);
         el.addEventListener('dragstart', event => { event.dataTransfer.setData('text/plain', a.id); event.dataTransfer.effectAllowed = 'copy'; });
       });
+    }
+
+    function visibilityIconMarkup(visible) {
+      const slash = visible ? '' : '<path d="M3 3l18 18" />';
+      return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.2-5.5 9.5-5.5S21.5 12 21.5 12s-3.2 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.4" />${slash}</svg>`;
     }
 
     function updateCanvasImagesUI() {
@@ -824,7 +1059,7 @@ document.addEventListener('DOMContentLoaded', () => {
       STATE.images.forEach(img => {
         const row = document.createElement('div'); row.className = 'canvas-object';
         const visible = img.viewerVisible !== false;
-        row.innerHTML = `<span class="object-name">${imageName(img)}</span><button class="select">Seleccionar</button><button class="toggle">${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}</button><button class="remove">✖</button>`;
+        row.innerHTML = `<span class="object-name">${imageName(img)}</span><button class="select">Seleccionar</button><button class="toggle eye-toggle" title="${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}" aria-label="${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}">${visibilityIconMarkup(visible)}</button><button class="remove">✖</button>`;
         row.querySelector('.select').addEventListener('click', () => { selectedImageId = img.id; setTool('select'); redraw(); });
         row.querySelector('.toggle').addEventListener('click', () => { img.viewerVisible = !visible; try { socket.send(JSON.stringify({ type: 'image:update', payload: img })); } catch(e) {} updateCanvasImagesUI(); redraw(); });
         row.querySelector('.remove').addEventListener('click', () => { STATE.images = STATE.images.filter(item => item.id !== img.id); if (selectedImageId === img.id) selectedImageId = null; try { socket.send(JSON.stringify({ type: 'image:remove', payload: { id: img.id } })); } catch(e) {} updateCanvasImagesUI(); redraw(); });
@@ -839,7 +1074,7 @@ document.addEventListener('DOMContentLoaded', () => {
       items.forEach(item => {
         const visible = item.viewerVisible !== false;
         const row = document.createElement('div'); row.className = 'canvas-object';
-        row.innerHTML = `<span class="object-name">${label}: ${item.text || (item.mode === 'down' ? 'Regresivo' : 'Ascendente')}</span>${eventPrefix === 'text' || eventPrefix === 'timer' ? '<button class="select">Seleccionar</button>' : ''}<button class="toggle">${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}</button><button class="remove">✖</button>`;
+        row.innerHTML = `<span class="object-name">${label}: ${item.text || (item.mode === 'down' ? 'Regresivo' : 'Ascendente')}</span>${eventPrefix === 'text' || eventPrefix === 'timer' ? '<button class="select">Seleccionar</button>' : ''}<button class="toggle eye-toggle" title="${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}" aria-label="${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}">${visibilityIconMarkup(visible)}</button><button class="remove">✖</button>`;
         if (eventPrefix === 'text') row.querySelector('.select').addEventListener('click', () => { selectedTextId = item.id; selectedImageId = null; setTool('select'); redraw(); });
         if (eventPrefix === 'timer') row.querySelector('.select').addEventListener('click', () => { selectedTimerId = item.id; selectedTextId = null; selectedImageId = null; setTool('select'); redraw(); });
         row.querySelector('.toggle').addEventListener('click', () => { item.viewerVisible = !visible; try { socket.send(JSON.stringify({ type: `${eventPrefix}:update`, payload: item })); } catch(e) {} createOverlayRow(container, items, label, eventPrefix); redraw(); });
@@ -868,7 +1103,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const selectedAsset = STATE.assets.audio.find(a => a.id === assetId);
           if (!selectedAsset) return;
           STATE.audio.slots[String(slot)] = selectedAsset;
-          publishSnapshot(); updateSoundboardUI();
+          publishSnapshot(); updateSoundboardUI(); updateAudioLibraryUI();
         });
         soundboard.appendChild(button);
       }
@@ -877,7 +1112,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // initial
-    updateImagesLibraryUI(); updateAudioLibraryUI(); updateFontOptions(); updateCanvasImagesUI(); updateTextList(); updateTimerList(); updateSoundboardUI(); fitCanvas();
+    updateImagesLibraryUI(); updateAudioLibraryUI(); updateCanvasImagesUI(); updateTextList(); updateTimerList(); updateSoundboardUI(); fitCanvas(); loadProjectInfo();
     console.log('Editor inicializado correctamente.');
 
   } catch (err) {
