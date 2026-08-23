@@ -6,32 +6,27 @@
   <title>Telestrator — Editor</title>
   <link rel="stylesheet" href="/css/styles.css" />
   <style>
-    #editorViewport { background: transparent; overflow: hidden; }
     #imageLayer, #textLayer { position:absolute; left:0; top:0; pointer-events:none; }
     #editorCanvas { position:absolute; left:0; top:0; }
-    .top-controls { display:flex; align-items:center; gap:8px; margin-left:auto; }
-    .top-controls input[type=range] { width:100px; }
-    .lib-item { padding:6px; border-bottom:1px solid rgba(255,255,255,0.03); display:flex; gap:8px; align-items:center; }
-    textarea#paraText { width:100%; height:80px; }
   </style>
 </head>
 <body>
   <div id="app">
-    <div class="topbar" style="display:flex;align-items:center;gap:12px;">
-      <h1>Editor (local)</h1>
+    <div class="topbar">
+      <div class="brand"><span class="brand-mark">T</span><div><h1>Telestrator</h1><span>Live overlay console</span></div></div>
       <div class="top-controls">
-        <label style="display:flex;align-items:center;gap:6px;">
-          🔊
+        <label class="master-volume">
+          <span>Volumen</span>
           <input id="masterVolume" type="range" min="0" max="100" value="100" />
         </label>
-        <button id="btn-undo" title="Undo">↶</button>
-        <button id="btn-clean" title="Clean canvas">🧹</button>
+        <button id="btn-undo" title="Deshacer">↶</button>
+        <button id="btn-clean" title="Limpiar canvas">⌫</button>
       </div>
     </div>
 
-    <div class="row" style="height:calc(100vh - 72px);">
-      <div class="leftpanel" style="width:360px;padding:8px;box-sizing:border-box;">
-        <div class="left-tabs" style="display:flex;gap:8px;margin-bottom:12px;">
+    <div class="row">
+      <div class="leftpanel">
+        <div class="left-tabs">
           <button class="tab-btn active" data-tab="tools" title="Herramienta">🖌️</button>
           <button class="tab-btn" data-tab="images" title="Imágenes/GIFs">🖼️</button>
           <button class="tab-btn" data-tab="audio" title="Audio">🎵</button>
@@ -41,10 +36,6 @@
 
         <div class="panel tab-panel" id="panel-tools" data-tab="tools">
           <h3>Herramienta</h3>
-          <div style="display:flex;gap:8px;margin-bottom:8px">
-            <button id="toolBrush">Brush</button>
-            <button id="toolSelect">Select</button>
-          </div>
           <div style="margin-top:8px">
             <label>Color: <input id="brushColor" type="color" value="#ff0000"></label>
             <label style="margin-left:8px">Grosor: <input id="brushSize" type="range" min="1" max="60" value="6"></label>
@@ -57,24 +48,47 @@
           <input id="imgFile" type="file" accept="image/*">
           <button id="btn-upload-img">Subir a biblioteca</button>
           <div id="imagesList" style="margin-top:8px;max-height:56vh;overflow:auto;"></div>
+          <h3 style="margin-top:16px">Imágenes en el canvas</h3>
+          <p class="small">En esta pestaña se activa la selección: arrastra una imagen o redimensiónala desde la esquina inferior derecha.</p>
+          <div id="canvasImagesList"></div>
         </div>
 
         <div class="panel tab-panel" id="panel-audio" data-tab="audio" style="display:none">
           <h3>Biblioteca — Audio</h3>
           <input id="audioFile" type="file" accept="audio/*">
           <button id="btn-upload-audio">Subir a biblioteca</button>
+          <p class="small">Arrastra un audio de la biblioteca a uno de los números del soundboard.</p>
           <div id="audioList" style="margin-top:8px;max-height:56vh;overflow:auto;"></div>
         </div>
 
         <div class="panel tab-panel" id="panel-paragraphs" data-tab="paragraphs" style="display:none">
-          <h3>Biblioteca — Párrafos</h3>
-          <label>Texto:</label>
-          <textarea id="paraText" placeholder="Escribe aquí tu párrafo..."></textarea>
-          <div style="display:flex;gap:8px;margin-top:6px;">
-            <input id="paraFontSize" type="number" value="20" min="6" style="width:80px"/> <small>px</small>
-            <button id="btn-save-para">Agregar a la biblioteca</button>
+          <div class="inner-tabs">
+            <button class="inner-tab active" data-text-tab="text">Texto</button>
+            <button class="inner-tab" data-text-tab="timer">Cronómetro</button>
           </div>
-          <div id="paraList" style="margin-top:8px;max-height:36vh;overflow:auto;"></div>
+          <section class="text-section" data-text-tab="text">
+            <h3>Texto</h3>
+            <label>Texto:<textarea id="paraText" placeholder="Escribe aquí tu texto..."></textarea></label>
+            <div class="form-grid">
+              <label>Color <input id="paraColor" type="color" value="#ffffff"></label>
+              <label>Fuente <select id="paraFont"><option value="Arial">Arial</option><option value="Verdana">Verdana</option><option value="Georgia">Georgia</option><option value="Impact">Impact</option><option value="monospace">Monospace</option></select></label>
+            </div>
+            <p class="small">El texto se coloca oculto. En el canvas podés moverlo, redimensionarlo y mostrarlo en el Viewer.</p>
+            <label>Fuente personalizada <input id="fontFile" type="file" accept=".ttf,.otf,.woff,.woff2,font/*"></label>
+            <button id="btn-upload-font" type="button">Subir fuente</button>
+            <button id="btn-save-para" type="button">Añadir texto oculto</button>
+            <p class="small">Para añadir fuentes personalizadas, seleccioná el archivo desde <code>C:\Windows\Fonts</code>.</p>
+            <div id="paraList" class="canvas-objects"></div>
+          </section>
+          <section class="text-section" data-text-tab="timer" style="display:none">
+            <h3>Cronómetro</h3>
+            <div class="form-grid"><label>Modo <select id="timerMode"><option value="up">Cuenta hacia adelante</option><option value="down">Cuenta regresiva</option></select></label><label>Duración inicial <input id="timerSeconds" type="number" value="60" min="0"> seg.</label></div>
+            <div class="form-grid"><label>Color <input id="timerColor" type="color" value="#ffffff"></label><label>Tamaño <input id="timerFontSize" type="number" value="56" min="8" max="300"> px</label><label>Fuente <select id="timerFont"></select></label></div>
+            <div class="form-grid"><label>X <input id="timerX" type="number" value="100" min="0"></label><label>Y <input id="timerY" type="number" value="260" min="0"></label></div>
+            <button id="btn-add-timer" type="button">Añadir cronómetro oculto</button>
+            <p class="small">Para añadir fuentes personalizadas, seleccioná el archivo desde <code>C:\Windows\Fonts</code>.</p>
+            <div id="timerList" class="canvas-objects"></div>
+          </section>
         </div>
 
         <div class="panel tab-panel" id="panel-control" data-tab="control" style="display:none">
@@ -82,13 +96,26 @@
           <button id="btn-push-state">Push state → Viewer (snapshot)</button>
           <button id="btn-fetch-state">Fetch state</button>
           <button id="btn-reset-server">Reset server (dev)</button>
+          <h3 style="margin-top:16px">Vista opcional del stream</h3>
+          <select id="streamPlatform"><option value="twitch">Twitch</option><option value="youtube">YouTube</option><option value="kick">Kick</option></select>
+          <input id="streamSource" type="text" placeholder="Canal o enlace del stream" style="width:100%;box-sizing:border-box;margin-top:6px">
+          <div style="display:flex;gap:8px"><button id="btn-show-stream" type="button">Mostrar como fondo</button><button id="btn-hide-stream" type="button">Ocultar fondo</button></div>
+          <p class="small">Solo aparece en el Editor, sin sonido. Puede tener retraso respecto al directo.</p>
           <div style="margin-top:8px;color:#9aa6b8;font-size:13px">Pan: mantén clic rueda y arrastra • Zoom: rueda</div>
         </div>
       </div>
 
-      <div class="canvaswrap" style="flex:1;display:flex;align-items:stretch;padding:8px;">
-        <div class="stage" style="flex:1;position:relative;border:1px solid rgba(255,255,255,0.04);">
-          <div id="editorViewport" style="width:100%;height:100%;position:relative;">
+      <div class="canvaswrap">
+        <div class="stage">
+          <section class="soundboard-overlay" aria-label="Soundboard">
+            <div class="soundboard-actions">
+              <button id="btn-sound-pause" type="button" title="Pausar o reanudar">Ⅱ</button>
+              <button id="btn-sound-stop" type="button" title="Detener">■</button>
+            </div>
+            <div id="soundboard" class="soundboard" aria-label="Soundboard de 0 a 9"></div>
+          </section>
+          <div id="editorViewport">
+            <div id="streamPreview" aria-hidden="true"></div>
             <canvas id="editorCanvas"></canvas>
             <div id="imageLayer" aria-hidden="true"></div>
             <div id="textLayer" aria-hidden="true"></div>

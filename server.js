@@ -39,9 +39,12 @@ app.use(express.static(path.join(__dirname, 'public')));
 let STATE = {
   strokes: [],    // strokes completos (para snapshot)
   images: [],     // imágenes actualmente en canvas: { id, url, x, y, width, height }
-  audio: { current: null, playlist: [] },
-  assets: { images: [], audio: [] }, // biblioteca de assets del proyecto
+  texts: [],
+  timers: [],
+  audio: { current: null, playlist: [], slots: {} },
+  assets: { images: [], audio: [], fonts: [] }, // biblioteca de assets del proyecto
   viewport: { x: 0, y: 0, width: 1920, height: 1080, scale: 1 }, // safe zone por defecto 1920x1080
+  volume: 1,
   updatedAt: Date.now()
 };
 
@@ -61,9 +64,12 @@ app.post('/state', (req, res) => {
   STATE = {
     strokes: Array.isArray(incoming.strokes) ? incoming.strokes : STATE.strokes,
     images: Array.isArray(incoming.images) ? incoming.images : STATE.images,
+    texts: Array.isArray(incoming.texts) ? incoming.texts : STATE.texts,
+    timers: Array.isArray(incoming.timers) ? incoming.timers : STATE.timers,
     audio: incoming.audio || STATE.audio,
     assets: incoming.assets || STATE.assets,
     viewport: incoming.viewport || STATE.viewport,
+    volume: typeof incoming.volume === 'number' ? incoming.volume : STATE.volume,
     updatedAt: Date.now()
   };
 
@@ -85,9 +91,12 @@ app.post('/reset', (req, res) => {
   STATE = {
     strokes: [],
     images: [],
-    audio: { current: null, playlist: [] },
-    assets: { images: [], audio: [] },
+    texts: [],
+    timers: [],
+    audio: { current: null, playlist: [], slots: {} },
+    assets: { images: [], audio: [], fonts: [] },
     viewport: { x: 0, y: 0, width: 1920, height: 1080, scale: 1 },
+    volume: 1,
     updatedAt: Date.now()
   };
   broadcastWS({ type: 'snapshot', state: STATE });
@@ -187,7 +196,9 @@ wss.on('connection', (ws, req) => {
           STATE.images = STATE.images.filter(x => x.url !== data.payload.url);
           STATE.updatedAt = Date.now();
         }
-        broadcastWS({ type: 'assets:update', payload: STATE.assets }, null);
+        // El Viewer no usa la biblioteca: necesita el estado completo para retirar
+        // inmediatamente las imágenes que este asset tenía colocadas en el canvas.
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
         break;
       case 'asset:audio:add':
         if (data.payload) {
@@ -226,6 +237,67 @@ wss.on('connection', (ws, req) => {
         STATE.audio.current = null;
         STATE.updatedAt = Date.now();
         broadcastWS({ type: 'audio:stop' }, null);
+        break;
+
+      case 'asset:font:add':
+        if (data.payload) {
+          STATE.assets.fonts = STATE.assets.fonts || [];
+          STATE.assets.fonts.push(data.payload);
+          STATE.updatedAt = Date.now();
+        }
+        broadcastWS({ type: 'assets:update', payload: STATE.assets }, null);
+        break;
+
+      case 'text:add':
+        if (data.payload) { STATE.texts.push(data.payload); STATE.updatedAt = Date.now(); }
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
+        break;
+      case 'text:update':
+        if (data.payload && data.payload.id) {
+          const index = STATE.texts.findIndex(item => item.id === data.payload.id);
+          if (index >= 0) STATE.texts[index] = Object.assign({}, STATE.texts[index], data.payload);
+          STATE.updatedAt = Date.now();
+        }
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
+        break;
+      case 'text:remove':
+        if (data.payload && data.payload.id) { STATE.texts = STATE.texts.filter(item => item.id !== data.payload.id); STATE.updatedAt = Date.now(); }
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
+        break;
+      case 'timer:add':
+        if (data.payload) {
+          // La hora del servidor mantiene el cronómetro igual para moderadores y Viewer.
+          STATE.timers.push(Object.assign({}, data.payload, { startedAtServer: Date.now() }));
+          STATE.updatedAt = Date.now();
+        }
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
+        break;
+      case 'timer:update':
+        if (data.payload && data.payload.id) {
+          const index = STATE.timers.findIndex(item => item.id === data.payload.id);
+          if (index >= 0) STATE.timers[index] = Object.assign({}, STATE.timers[index], data.payload);
+          STATE.updatedAt = Date.now();
+        }
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
+        break;
+      case 'timer:remove':
+        if (data.payload && data.payload.id) { STATE.timers = STATE.timers.filter(item => item.id !== data.payload.id); STATE.updatedAt = Date.now(); }
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
+        break;
+      case 'audio:pause':
+        if (STATE.audio.current) STATE.audio.current.paused = true;
+        broadcastWS({ type: 'audio:pause' }, null);
+        break;
+      case 'audio:resume':
+        if (STATE.audio.current) STATE.audio.current = Object.assign({}, STATE.audio.current, data.payload, { paused: false });
+        broadcastWS({ type: 'audio:resume', payload: STATE.audio.current }, null);
+        break;
+      case 'volume:update':
+        if (data.payload && typeof data.payload.volume === 'number') {
+          STATE.volume = Math.max(0, Math.min(1, data.payload.volume));
+          STATE.updatedAt = Date.now();
+        }
+        broadcastWS({ type: 'volume:update', payload: { volume: STATE.volume } }, null);
         break;
 
       // snapshot (full)

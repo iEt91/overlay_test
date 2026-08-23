@@ -20,10 +20,20 @@ const domImageMap = new Map();
 let WORLD = {
   strokes: [],
   images: [],
+  texts: [],
+  timers: [],
   audio: { current: null, playlist: [] },
   viewport: { x: 0, y: 0, width: 1920, height: 1080, scale: 1 },
   volume: 1.0
 };
+const loadedFonts = new Set();
+function loadCustomFonts(fonts = []) {
+  fonts.forEach(font => {
+    if (!font || !font.name || !font.url || loadedFonts.has(font.id)) return;
+    loadedFonts.add(font.id);
+    new FontFace(font.name, `url(${font.url})`).load().then(face => document.fonts.add(face)).catch(() => {});
+  });
+}
 
 // ----------------------------- Audio (estable) -----------------------------
 // Subsistema robusto para CEF/OBS: 1 solo AudioContext, 1 solo HTMLAudioElement,
@@ -190,6 +200,7 @@ function handleMessage(msg) {
     case 'snapshot':
       if (msg.state) {
         WORLD = Object.assign({}, WORLD, msg.state);
+        loadCustomFonts((msg.state.assets && msg.state.assets.fonts) || []);
         if (typeof WORLD.volume !== 'number') WORLD.volume = 1.0;
         setMasterVolume(WORLD.volume);
         adjustCanvasToViewport();
@@ -241,9 +252,25 @@ function handleMessage(msg) {
       WORLD.audio.current = null;
       handleAudioStop();
       break;
+    case 'audio:pause':
+      if (AudioState.el) AudioState.el.pause();
+      AudioState.playing = false;
+      if (WORLD.audio.current) WORLD.audio.current.paused = true;
+      break;
+    case 'audio:resume':
+      if (AudioState.el && AudioState.currentUrl) {
+        AudioState.el.play().then(() => { AudioState.playing = true; }).catch(showAudioUnlock);
+      } else if (msg.payload) {
+        handleAudioTrigger(msg.payload);
+      }
+      if (msg.payload) WORLD.audio.current = Object.assign({}, WORLD.audio.current, msg.payload, { paused: false });
+      break;
     case 'volume:update':
       WORLD.volume = (msg.payload && typeof msg.payload.volume === 'number') ? msg.payload.volume : WORLD.volume;
       handleVolumeUpdate({ volume: WORLD.volume });
+      break;
+    case 'assets:update':
+      if (msg.payload && msg.payload.fonts) loadCustomFonts(msg.payload.fonts);
       break;
 
     default:
@@ -287,11 +314,28 @@ function render() {
   const vp = WORLD.viewport || { x: 0, y: 0, width: 1920, height: 1080 };
   ctx.translate(-vp.x, -vp.y);
 
-  for (const img of WORLD.images || []) drawImageObject(img);
+  for (const img of WORLD.images || []) if (img.viewerVisible !== false && img.visible !== false) drawImageObject(img);
+  for (const text of WORLD.texts || []) if (text.viewerVisible !== false) drawText(text);
+  for (const timer of WORLD.timers || []) if (timer.viewerVisible !== false) drawTimer(timer);
   for (const s of WORLD.strokes || []) drawStroke(s);
 
   ctx.restore();
   updateDomImages();
+}
+
+function drawText(item) {
+  ctx.save();
+  ctx.fillStyle = item.color || '#ffffff';
+  ctx.font = `${item.size || 48}px "${item.font || 'Arial'}"`;
+  ctx.textBaseline = 'top';
+  String(item.text || '').split('\n').forEach((line, index) => ctx.fillText(line, item.x || 0, (item.y || 0) + index * (item.size || 48) * 1.2));
+  ctx.restore();
+}
+function drawTimer(item) {
+  const elapsed = Math.max(0, Math.floor((Date.now() - item.startedAtServer) / 1000));
+  const seconds = item.mode === 'down' ? Math.max(0, (item.duration || 0) - elapsed) : elapsed;
+  const text = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+  drawText({ ...item, text });
 }
 
 function drawStroke(stroke) {
@@ -330,6 +374,7 @@ function updateDomImages() {
   if (!imageLayer) return;
   const used = new Set();
   for (const img of WORLD.images || []) {
+    if (img.viewerVisible === false || img.visible === false) continue;
     let el = domImageMap.get(img.id);
     if (!el) {
       el = document.createElement('img');
