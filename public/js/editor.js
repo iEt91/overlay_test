@@ -141,7 +141,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnResetTestChannel = document.getElementById('btn-reset-test-channel');
     const viewerUrlStatus = document.getElementById('viewerUrlStatus');
     const btnCopyViewer = document.getElementById('btn-copy-viewer');
-    const btnRotateViewer = document.getElementById('btn-rotate-viewer');
     const btnOverlayVisibility = document.getElementById('btn-overlay-visibility');
     const chatEnabled = document.getElementById('chatEnabled');
     const twitchChatPanel = document.getElementById('twitchChatPanel');
@@ -328,10 +327,10 @@ document.addEventListener('DOMContentLoaded', () => {
       if (chatEnabled) chatEnabled.checked = Boolean(project.chat_enabled);
       if (payload.viewerUrl) {
         latestViewerUrl = payload.viewerUrl;
-        if (viewerUrlStatus) viewerUrlStatus.textContent = 'Tu URL privada está lista para copiar en OBS.';
+        if (viewerUrlStatus) viewerUrlStatus.textContent = 'URL permanente lista. Configurala una vez en OBS y no cambia.';
       } else if (viewerUrlStatus && !latestViewerUrl) {
         viewerUrlStatus.textContent = owner
-          ? 'La URL se muestra al crearla o al renovarla. Renovarla invalida la anterior.'
+          ? 'No se pudo cargar la URL permanente del Viewer.'
           : 'El streamer propietario administra la URL privada del Viewer.';
       }
       setChatVisibility(Boolean(project.chat_enabled));
@@ -424,7 +423,7 @@ document.addEventListener('DOMContentLoaded', () => {
       activityRefreshTimer = setTimeout(loadActivity, 1800);
     }
     async function copyViewerUrl() {
-      if (!latestViewerUrl) { alert('La URL no está disponible en esta sesión. Si sos el streamer, podés renovarla para generar una nueva.'); return; }
+      if (!latestViewerUrl) { alert('La URL permanente todavía no está disponible. Recargá el editor.'); return; }
       try { await navigator.clipboard.writeText(latestViewerUrl); if (viewerUrlStatus) viewerUrlStatus.textContent = 'URL copiada. Pegala como fuente de navegador en OBS.'; }
       catch (_) { alert('No se pudo copiar automáticamente.'); }
     }
@@ -873,13 +872,6 @@ document.addEventListener('DOMContentLoaded', () => {
       showStreamPreview();
     });
     btnCopyViewer && btnCopyViewer.addEventListener('click', copyViewerUrl);
-    btnRotateViewer && btnRotateViewer.addEventListener('click', async () => {
-      try {
-        const result = await apiRequest('/api/project/viewer-token', { method: 'POST' });
-        latestViewerUrl = result.viewerUrl;
-        await copyViewerUrl();
-      } catch (error) { alert(error.message); }
-    });
     btnOverlayVisibility && btnOverlayVisibility.addEventListener('click', async () => {
       if (!PROJECT_INFO) return;
       const visible = !PROJECT_INFO || PROJECT_INFO.project.overlay_enabled !== false;

@@ -29,6 +29,9 @@ const ALLOW_TEST_CHANNEL_OVERRIDE = process.env.ALLOW_TEST_CHANNEL_OVERRIDE === 
 
 // La clave de sesión debe existir únicamente en .env. Nunca se envía al navegador.
 const SESSION_SECRET = process.env.SESSION_SECRET;
+// Firma exclusiva de los enlaces permanentes del Viewer. Si todavía no se
+// configura, se mantiene la compatibilidad usando SESSION_SECRET.
+const VIEWER_URL_SECRET = process.env.VIEWER_URL_SECRET || SESSION_SECRET || 'development-viewer-secret';
 const isProduction = process.env.NODE_ENV === 'production';
 const SESSION_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
 const supabaseAdmin = SUPABASE_URL && SUPABASE_SECRET_KEY
@@ -209,6 +212,23 @@ function hashOpaqueToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+function persistentViewerToken(project) {
+  const signature = crypto.createHmac('sha256', VIEWER_URL_SECRET)
+    .update(`${project.id}:${project.viewer_token_hash}`)
+    .digest('base64url');
+  return `v1.${project.id}.${signature}`;
+}
+
+function safeEqual(left, right) {
+  const a = Buffer.from(String(left));
+  const b = Buffer.from(String(right));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function viewerUrlForProject(req, project) {
+  return `${requestOrigin(req)}/viewer/${persistentViewerToken(project)}`;
+}
+
 function databaseError(result, message) {
   if (result && result.error) {
     console.error(message, result.error.message);
@@ -262,7 +282,7 @@ async function ensureOwnerProject(user) {
   databaseError(scene, 'No se pudo crear la escena inicial.');
 
   await recordAudit(newProject.id, user.id, 'project.created');
-  return { project: newProject, role: 'owner', viewerToken };
+  return { project: newProject, role: 'owner', viewerToken: persistentViewerToken(newProject) };
 }
 
 async function acceptProjectInvite(token, user) {
@@ -410,7 +430,22 @@ async function requireEditorPage(req, res, next) {
 }
 
 async function findViewerProject(token) {
-  if (!token || token.length < 30) return null;
+  if (!token) return null;
+  const stableMatch = String(token).match(/^v1\.([0-9a-f-]{36})\.([A-Za-z0-9_-]{40,})$/i);
+  if (stableMatch) {
+    const result = await supabaseAdmin.from('projects')
+      .select('id, viewer_token_hash, overlay_enabled, subscription_status, trial_ends_at')
+      .eq('id', stableMatch[1])
+      .maybeSingle();
+    const project = databaseError(result, 'No se pudo validar el Viewer.');
+    if (!project || !safeEqual(stableMatch[2], persistentViewerToken(project).split('.')[2])) return null;
+    if (project.subscription_status === 'suspended' || project.subscription_status === 'canceled') return null;
+    if (project.subscription_status === 'trialing' && project.trial_ends_at && new Date(project.trial_ends_at) <= new Date()) return null;
+    delete project.viewer_token_hash;
+    return project;
+  }
+  // Compatibilidad con los enlaces temporales emitidos por versiones previas.
+  if (token.length < 30) return null;
   const result = await supabaseAdmin.from('projects')
     .select('id, overlay_enabled, subscription_status, trial_ends_at')
     .eq('viewer_token_hash', hashOpaqueToken(token))
@@ -651,19 +686,19 @@ function requestOrigin(req) {
 app.get('/api/project', requireEditorApi, async (req, res) => {
   try {
     const result = await supabaseAdmin.from('projects')
-      .select('id, twitch_channel_login, chat_enabled, stream_preview_enabled, overlay_enabled, subscription_status, trial_ends_at')
+      .select('id, twitch_channel_login, chat_enabled, stream_preview_enabled, overlay_enabled, subscription_status, trial_ends_at, viewer_token_hash')
       .eq('id', req.projectAccess.projectId)
       .single();
     const project = databaseError(result, 'No se pudo cargar el proyecto.');
-    const viewerToken = req.session.newViewerToken || null;
     req.session.newViewerToken = null;
     req.session.save(() => {});
+    const { viewer_token_hash, ...projectForClient } = project;
     res.json({
-      project,
+      project: projectForClient,
       role: req.projectAccess.role,
       user: req.session.user,
       testChannelOverrideEnabled: req.projectAccess.role === 'owner' && ALLOW_TEST_CHANNEL_OVERRIDE,
-      viewerUrl: viewerToken ? `${requestOrigin(req)}/viewer/${viewerToken}` : null
+      viewerUrl: req.projectAccess.role === 'owner' ? viewerUrlForProject(req, project) : null
     });
   } catch (_) {
     res.status(503).json({ error: 'No se pudo cargar la configuración del proyecto.' });
@@ -676,13 +711,13 @@ app.post('/api/project/viewer-token', requireOwnerApi, async (req, res) => {
     const result = await supabaseAdmin.from('projects').update({
       viewer_token_hash: hashOpaqueToken(viewerToken),
       viewer_token_created_at: new Date().toISOString()
-    }).eq('id', req.projectAccess.projectId);
-    databaseError(result, 'No se pudo renovar el Viewer.');
+    }).eq('id', req.projectAccess.projectId).select('id, viewer_token_hash').single();
+    const project = databaseError(result, 'No se pudo renovar el Viewer.');
     wss.clients.forEach(client => {
       if (client.role === 'viewer' && client.projectId === req.projectAccess.projectId) client.close(4002, 'El enlace del Viewer fue renovado');
     });
     recordAudit(req.projectAccess.projectId, req.session.user.id, 'viewer.token_rotated').catch(() => {});
-    res.json({ viewerUrl: `${requestOrigin(req)}/viewer/${viewerToken}` });
+    res.json({ viewerUrl: viewerUrlForProject(req, project) });
   } catch (_) {
     res.status(503).json({ error: 'No se pudo renovar el enlace del Viewer.' });
   }
