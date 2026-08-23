@@ -92,6 +92,10 @@ input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); ou
 .panel button.danger-action:hover { background: rgba(220,105,105,.12); }
 .button-row { display: flex; gap: 7px; }
 .button-row button { flex: 1; }
+.test-channel-controls { margin-top: 14px; padding: 11px; border: 1px dashed #354445; border-radius: 5px; background: rgba(16,23,24,.55); }
+.test-channel-controls input { height: 34px; margin: 5px 0 0; padding: 0 9px; font-size: 12px; }
+.test-channel-controls .button-row button { min-height: 31px; margin-top: 8px; }
+.test-channel-controls .small { margin: 9px 0 0; }
 .status-card { padding: 10px; border: 1px solid #2d3a3b; border-radius: 5px; background: #101718; color: #b9c7c5; font-size: 11px; line-height: 1.5; }
 .panel label.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; cursor: pointer; }
 .toggle-row input { position: absolute; opacity: 0; pointer-events: none; }

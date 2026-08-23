@@ -135,6 +135,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnHideStream = document.getElementById('btn-hide-stream');
     const accountSummary = document.getElementById('accountSummary');
     const linkedChannel = document.getElementById('linkedChannel');
+    const testChannelControls = document.getElementById('testChannelControls');
+    const testChannelInput = document.getElementById('testChannelInput');
+    const btnUseTestChannel = document.getElementById('btn-use-test-channel');
+    const btnResetTestChannel = document.getElementById('btn-reset-test-channel');
     const viewerUrlStatus = document.getElementById('viewerUrlStatus');
     const btnCopyViewer = document.getElementById('btn-copy-viewer');
     const btnRotateViewer = document.getElementById('btn-rotate-viewer');
@@ -177,6 +181,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let PROJECT_INFO = null;
     let latestViewerUrl = null;
     let activityRefreshTimer = null;
+    let testPreviewChannel = sessionStorage.getItem('tango.test-preview-channel') || '';
 
     function updateRealtimeStatus(message, offline = false) {
       if (!realtimeStatus || !roomSummary) return;
@@ -250,8 +255,16 @@ document.addEventListener('DOMContentLoaded', () => {
     function screenToWorld(p) { return { x: p.x / transform.scale + transform.tx, y: p.y / transform.scale + transform.ty }; }
     function generateId() { return Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6).toString(36); }
     function isGifUrl(url) { return /\.gif(\?.*)?$/i.test(url); }
+    function normalizeTwitchChannel(value) {
+      const raw = String(value || '').trim().toLowerCase();
+      const match = raw.match(/(?:twitch\.tv\/)?([a-z0-9_]{4,25})(?:[/?#].*)?$/i);
+      return match ? match[1].toLowerCase() : null;
+    }
+    function currentPreviewChannel() {
+      return testPreviewChannel || (PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.twitch_channel_login);
+    }
     function showStreamPreview() {
-      const channel = PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.twitch_channel_login;
+      const channel = currentPreviewChannel();
       if (!channel) { alert('Todavía no se pudo cargar el canal vinculado.'); return; }
       streamPreview.innerHTML = '';
       const playerHost = document.createElement('div'); playerHost.id = 'twitch-background-player'; streamPreview.appendChild(playerHost);
@@ -310,6 +323,8 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       if (linkedChannel) linkedChannel.textContent = `Canal bloqueado: twitch.tv/${project.twitch_channel_login}`;
       document.querySelectorAll('.owner-only').forEach(el => { el.style.display = owner ? '' : 'none'; });
+      if (testChannelControls) testChannelControls.hidden = !(owner && payload.testChannelOverrideEnabled);
+      if (testChannelInput) testChannelInput.value = testPreviewChannel;
       if (chatEnabled) chatEnabled.checked = Boolean(project.chat_enabled);
       if (payload.viewerUrl) {
         latestViewerUrl = payload.viewerUrl;
@@ -843,6 +858,20 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     btnShowStream && btnShowStream.addEventListener('click', showStreamPreview);
     btnHideStream && btnHideStream.addEventListener('click', () => { streamPreview.innerHTML = ''; streamPreview.style.display = 'none'; setStreamInteraction(false); });
+    btnUseTestChannel && btnUseTestChannel.addEventListener('click', () => {
+      const channel = normalizeTwitchChannel(testChannelInput && testChannelInput.value);
+      if (!channel) { alert('Escribí un usuario de Twitch válido, por ejemplo: ibai.'); return; }
+      testPreviewChannel = channel;
+      sessionStorage.setItem('tango.test-preview-channel', channel);
+      if (testChannelInput) testChannelInput.value = channel;
+      showStreamPreview();
+    });
+    btnResetTestChannel && btnResetTestChannel.addEventListener('click', () => {
+      testPreviewChannel = '';
+      sessionStorage.removeItem('tango.test-preview-channel');
+      if (testChannelInput) testChannelInput.value = '';
+      showStreamPreview();
+    });
     btnCopyViewer && btnCopyViewer.addEventListener('click', copyViewerUrl);
     btnRotateViewer && btnRotateViewer.addEventListener('click', async () => {
       try {

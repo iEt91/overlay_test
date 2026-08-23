@@ -104,6 +104,12 @@
           <p id="linkedChannel" class="small">Cargando canal…</p>
           <div class="button-row"><button id="btn-show-stream" type="button">Mostrar fondo</button><button id="btn-hide-stream" class="secondary-action" type="button">Ocultar</button></div>
           <p class="small">Solo aparece en el Editor, sin sonido. Los invitados ven únicamente este canal.</p>
+          <div id="testChannelControls" class="test-channel-controls" hidden>
+            <label class="field-label" for="testChannelInput">Canal de prueba</label>
+            <input id="testChannelInput" type="text" maxlength="25" autocomplete="off" spellcheck="false" placeholder="usuario_de_twitch">
+            <div class="button-row"><button id="btn-use-test-channel" type="button">Ver canal de prueba</button><button id="btn-reset-test-channel" class="secondary-action" type="button">Restaurar</button></div>
+            <p class="small">Solo cambia tu fondo en esta pestaña. No modifica el canal, chat ni Viewer del proyecto.</p>
+          </div>
           <label class="toggle-row owner-only"><span>Chat de Twitch en el Editor</span><input id="chatEnabled" type="checkbox"><i aria-hidden="true"></i></label>
           <div class="section-divider"></div><h3>Invitados</h3>
           <button id="btn-create-invite" class="owner-only" type="button">Crear invitación de moderador</button>

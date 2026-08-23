@@ -23,6 +23,9 @@ const TWITCH_REDIRECT_URI = process.env.TWITCH_REDIRECT_URI || `http://localhost
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET?.trim();
+// Sólo para pruebas internas: permite al propietario previsualizar otro canal
+// sin cambiar el canal real del proyecto ni exponer esa opción a invitados.
+const ALLOW_TEST_CHANNEL_OVERRIDE = process.env.ALLOW_TEST_CHANNEL_OVERRIDE === 'true';
 
 // La clave de sesión debe existir únicamente en .env. Nunca se envía al navegador.
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -659,6 +662,7 @@ app.get('/api/project', requireEditorApi, async (req, res) => {
       project,
       role: req.projectAccess.role,
       user: req.session.user,
+      testChannelOverrideEnabled: req.projectAccess.role === 'owner' && ALLOW_TEST_CHANNEL_OVERRIDE,
       viewerUrl: viewerToken ? `${requestOrigin(req)}/viewer/${viewerToken}` : null
     });
   } catch (_) {
