@@ -390,6 +390,7 @@ document.addEventListener('DOMContentLoaded', () => {
       'project.created': 'creó el proyecto',
       'member.invite_created': 'creó una invitación de moderador',
       'member.invite_accepted': 'aceptó una invitación',
+      'room.password_set': 'protegió la sala con contraseña',
       'member.removed': 'quitó a un invitado',
       'overlay.panic_enabled': 'ocultó todo el overlay',
       'overlay.restored': 'restauró el overlay',

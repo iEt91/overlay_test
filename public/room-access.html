@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Tango GG — Acceso a sala</title>
+  <link rel="stylesheet" href="/css/landing.css" />
+</head>
+<body class="access-body">
+  <main class="access-card" aria-live="polite">
+    <a class="landing-brand" href="/" aria-label="Tango GG, inicio"><span class="landing-mark">T</span><span>Tango GG</span></a>
+    <p class="kicker">SALA PRIVADA</p>
+    <h1 id="accessTitle">Comprobando acceso…</h1>
+    <p id="accessDescription" class="access-description">Validamos tu cuenta y la sala.</p>
+    <div id="roomBadge" class="room-badge" hidden><span>Sala</span><strong id="roomCode">—</strong></div>
+    <form id="roomForm" novalidate hidden>
+      <label id="passwordLabel" for="roomPassword">Contraseña de la sala</label>
+      <input id="roomPassword" name="password" type="password" autocomplete="current-password" minlength="10" maxlength="128" required />
+      <label id="confirmationWrap" for="roomPasswordConfirmation" hidden>Repetí la contraseña
+        <input id="roomPasswordConfirmation" name="confirmation" type="password" autocomplete="new-password" minlength="10" maxlength="128" />
+      </label>
+      <p id="passwordHint" class="field-hint">Usá entre 10 y 128 caracteres. No se guarda en texto visible.</p>
+      <p id="formError" class="form-error" hidden></p>
+      <button id="submitButton" class="primary-cta" type="submit">Continuar <span aria-hidden="true">→</span></button>
+    </form>
+    <p class="access-footnote">Para entrar necesitás una cuenta Twitch autorizada y la contraseña de esta sala.</p>
+  </main>
+  <script type="module" src="/js/room-access.js"></script>
+</body>
+</html>

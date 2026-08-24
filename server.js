@@ -34,6 +34,8 @@ const SESSION_SECRET = process.env.SESSION_SECRET;
 const VIEWER_URL_SECRET = process.env.VIEWER_URL_SECRET || SESSION_SECRET || 'development-viewer-secret';
 const isProduction = process.env.NODE_ENV === 'production';
 const SESSION_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
+const ROOM_PASSWORD_MIN_LENGTH = 10;
+const ROOM_PASSWORD_MAX_LENGTH = 128;
 const supabaseAdmin = SUPABASE_URL && SUPABASE_SECRET_KEY
   ? createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
@@ -355,6 +357,56 @@ function safeEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+function normalizeRoomPassword(value) {
+  if (typeof value !== 'string') return null;
+  const password = value.trim();
+  if (password.length < ROOM_PASSWORD_MIN_LENGTH || password.length > ROOM_PASSWORD_MAX_LENGTH) return null;
+  return password;
+}
+
+function scryptPassword(password, salt) {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, 64, { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }, (error, derivedKey) => {
+      if (error) reject(error);
+      else resolve(derivedKey);
+    });
+  });
+}
+
+async function hashRoomPassword(password) {
+  const salt = crypto.randomBytes(16).toString('base64url');
+  const derivedKey = await scryptPassword(password, salt);
+  return `scrypt-v1.${salt}.${derivedKey.toString('base64url')}`;
+}
+
+async function verifyRoomPassword(password, encodedHash) {
+  const [version, salt, storedKey] = String(encodedHash || '').split('.');
+  if (version !== 'scrypt-v1' || !salt || !storedKey) return false;
+  const derivedKey = await scryptPassword(password, salt);
+  const expected = Buffer.from(storedKey, 'base64url');
+  return expected.length === derivedKey.length && crypto.timingSafeEqual(expected, derivedKey);
+}
+
+async function getProjectRoomSecurity(projectId) {
+  const result = await supabaseAdmin.from('projects')
+    .select('id, owner_twitch_id, twitch_channel_login, room_password_hash, room_password_updated_at')
+    .eq('id', projectId)
+    .maybeSingle();
+  return databaseError(result, 'No se pudo validar la seguridad de la sala.');
+}
+
+function hasVerifiedRoomAccess(sessionData, project) {
+  const access = sessionData && sessionData.roomAccess;
+  if (!access || access.projectId !== project.id || !project.room_password_hash) return false;
+  const verifiedAt = Date.parse(access.passwordUpdatedAt || '');
+  const currentAt = Date.parse(project.room_password_updated_at || '');
+  return Number.isFinite(verifiedAt) && Number.isFinite(currentAt) && verifiedAt === currentAt;
+}
+
+function saveSession(req) {
+  return new Promise((resolve, reject) => req.session.save(error => error ? reject(error) : resolve()));
+}
+
 function viewerUrlForProject(req, project) {
   return `${requestOrigin(req)}/viewer/${persistentViewerToken(project)}`;
 }
@@ -415,7 +467,7 @@ async function ensureOwnerProject(user) {
   return { project: newProject, role: 'owner', viewerToken: persistentViewerToken(newProject) };
 }
 
-async function acceptProjectInvite(token, user) {
+async function validateProjectInvite(token, user) {
   await upsertTwitchUser(user);
   const inviteResult = await supabaseAdmin.from('project_invites')
     .select('id, project_id, expires_at, accepted_by_twitch_id, accepted_at')
@@ -427,6 +479,14 @@ async function acceptProjectInvite(token, user) {
   if (invite.accepted_by_twitch_id && invite.accepted_by_twitch_id !== user.id) {
     throw new Error('Esta invitación ya fue utilizada por otra cuenta de Twitch.');
   }
+
+  const existing = await getActiveMembership(invite.project_id, user.id);
+  return { invite, project: { id: invite.project_id }, existingRole: existing ? existing.role : null };
+}
+
+async function acceptProjectInvite(token, user) {
+  const validated = await validateProjectInvite(token, user);
+  const { invite } = validated;
 
   const existingResult = await supabaseAdmin.from('project_members')
     .select('role, active')
@@ -534,6 +594,10 @@ async function requireEditorApi(req, res, next) {
   try {
     const membership = await getActiveMembership(req.session.projectId, req.session.user.id);
     if (!membership) return res.status(403).json({ error: 'Ya no tenés acceso a este proyecto.' });
+    const project = await getProjectRoomSecurity(req.session.projectId);
+    if (!project || !hasVerifiedRoomAccess(req.session, project)) {
+      return res.status(403).json({ error: 'Ingresá la contraseña de la sala para continuar.' });
+    }
     req.projectAccess = { projectId: req.session.projectId, role: membership.role };
     next();
   } catch (_) {
@@ -553,6 +617,8 @@ async function requireEditorPage(req, res, next) {
   try {
     const membership = await getActiveMembership(req.session.projectId, req.session.user.id);
     if (!membership) return res.redirect('/auth/twitch');
+    const project = await getProjectRoomSecurity(req.session.projectId);
+    if (!project || !hasVerifiedRoomAccess(req.session, project)) return res.redirect('/room/access');
     req.projectAccess = { projectId: req.session.projectId, role: membership.role };
     next();
   } catch (_) {
@@ -652,9 +718,13 @@ app.get('/auth/twitch/callback', async (req, res) => {
     }
 
     const pendingInviteToken = req.session.pendingInviteToken;
-    const projectAccess = pendingInviteToken
-      ? await acceptProjectInvite(pendingInviteToken, user)
-      : await ensureOwnerProject(user);
+    // La invitación se valida ahora, pero no añade aún a la whitelist. El alta
+    // de miembro sucede recién cuando esa misma cuenta supera la contraseña de
+    // la sala en /room/access.
+    const inviteAccess = pendingInviteToken
+      ? await validateProjectInvite(pendingInviteToken, user)
+      : null;
+    const projectAccess = inviteAccess || await ensureOwnerProject(user);
 
     req.session.regenerate((sessionError) => {
       if (sessionError) return res.status(500).send('No se pudo crear la sesión. Volvé a intentarlo.');
@@ -667,13 +737,14 @@ app.get('/auth/twitch/callback', async (req, res) => {
       // El token OAuth se usa únicamente arriba para consultar la identidad y
       // luego se descarta. La sesión conserva sólo los datos mínimos del usuario.
       req.session.projectId = projectAccess.project.id;
-      req.session.projectRole = projectAccess.role;
+      req.session.projectRole = projectAccess.role || projectAccess.existingRole || 'pending';
+      req.session.pendingInviteToken = pendingInviteToken || null;
       // El token del Viewer solo se conserva una vez en la sesión del dueño.
       // Luego se podrá rotar desde la configuración sin revelar el anterior.
       req.session.newViewerToken = projectAccess.viewerToken || null;
       req.session.save((saveError) => {
         if (saveError) return res.status(500).send('No se pudo guardar la sesión. Volvé a intentarlo.');
-        res.redirect('/editor.html');
+        res.redirect('/room/access');
       });
     });
   } catch (error) {
@@ -684,6 +755,117 @@ app.get('/auth/twitch/callback', async (req, res) => {
 
 app.get('/api/auth/me', (req, res) => {
   res.json({ authenticated: Boolean(req.session.user), user: req.session.user || null });
+});
+
+async function getRoomAccessCandidate(req) {
+  if (!req.session.user || !req.session.projectId) return null;
+  const project = await getProjectRoomSecurity(req.session.projectId);
+  if (!project) return null;
+  const membership = await getActiveMembership(project.id, req.session.user.id);
+  let pendingInvite = null;
+  if (!membership && req.session.pendingInviteToken) {
+    pendingInvite = await validateProjectInvite(req.session.pendingInviteToken, req.session.user);
+    if (pendingInvite.project.id !== project.id) pendingInvite = null;
+  }
+  if (!membership && !pendingInvite) return null;
+  return { project, membership, pendingInvite };
+}
+
+async function requireRoomAccessPage(req, res, next) {
+  if (!req.session.user || !req.session.projectId) return res.redirect('/auth/twitch');
+  try {
+    const access = await getRoomAccessCandidate(req);
+    if (!access) return res.redirect('/auth/twitch');
+    req.roomAccessCandidate = access;
+    next();
+  } catch (_) {
+    res.status(503).send('No se pudo abrir la sala. Volvé a intentarlo.');
+  }
+}
+
+app.get('/room/access', requireRoomAccessPage, (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'room-access.html'));
+});
+
+app.get('/api/room/access', async (req, res) => {
+  try {
+    const access = await getRoomAccessCandidate(req);
+    if (!access) return res.status(403).json({ error: 'Necesitás una invitación válida para entrar a esta sala.' });
+    const isOwner = access.membership && access.membership.role === 'owner';
+    res.json({
+      roomCode: String(access.project.id).slice(-8).toUpperCase(),
+      channelLogin: access.project.twitch_channel_login,
+      user: req.session.user,
+      isOwner,
+      pendingInvitation: Boolean(access.pendingInvite),
+      needsPasswordSetup: !access.project.room_password_hash,
+      passwordVerified: hasVerifiedRoomAccess(req.session, access.project)
+    });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo cargar la sala.' });
+  }
+});
+
+app.post('/api/room/password', async (req, res) => {
+  try {
+    const access = await getRoomAccessCandidate(req);
+    if (!access || !access.membership || access.membership.role !== 'owner') {
+      return res.status(403).json({ error: 'Solo el streamer propietario puede crear la contraseña.' });
+    }
+    if (access.project.room_password_hash) return res.status(409).json({ error: 'La sala ya tiene una contraseña configurada.' });
+    const password = normalizeRoomPassword(req.body && req.body.password);
+    const confirmation = req.body && req.body.confirmation;
+    if (!password) return res.status(400).json({ error: `La contraseña debe tener entre ${ROOM_PASSWORD_MIN_LENGTH} y ${ROOM_PASSWORD_MAX_LENGTH} caracteres.` });
+    if (password !== confirmation) return res.status(400).json({ error: 'Las contraseñas no coinciden.' });
+    const roomPasswordHash = await hashRoomPassword(password);
+    const updatedAt = new Date().toISOString();
+    const result = await supabaseAdmin.from('projects').update({
+      room_password_hash: roomPasswordHash,
+      room_password_updated_at: updatedAt,
+      updated_at: updatedAt
+    }).eq('id', access.project.id).select('id, room_password_updated_at').single();
+    const securedProject = databaseError(result, 'No se pudo proteger la sala.');
+    req.session.roomAccess = { projectId: access.project.id, passwordUpdatedAt: securedProject.room_password_updated_at || null };
+    req.session.projectRole = 'owner';
+    await saveSession(req);
+    await recordAudit(access.project.id, req.session.user.id, 'room.password_set');
+    res.status(201).json({ redirect: '/editor.html' });
+  } catch (error) {
+    console.error('Room password setup error:', error.message);
+    res.status(500).json({ error: 'No se pudo crear la contraseña de la sala.' });
+  }
+});
+
+app.post('/api/room/unlock', async (req, res) => {
+  try {
+    const access = await getRoomAccessCandidate(req);
+    if (!access) return res.status(403).json({ error: 'Necesitás una invitación válida para entrar a esta sala.' });
+    if (!access.project.room_password_hash) {
+      return res.status(409).json({ error: 'El streamer todavía no configuró la contraseña de la sala.' });
+    }
+    const password = normalizeRoomPassword(req.body && req.body.password);
+    if (!password || !await verifyRoomPassword(password, access.project.room_password_hash)) {
+      return res.status(401).json({ error: 'La contraseña de la sala no es correcta.' });
+    }
+    let membership = access.membership;
+    if (!membership) {
+      const accepted = await acceptProjectInvite(req.session.pendingInviteToken, req.session.user);
+      membership = { role: accepted.role, active: true };
+    }
+    req.session.roomAccess = {
+      projectId: access.project.id,
+      passwordUpdatedAt: access.project.room_password_updated_at || null
+    };
+    req.session.projectRole = membership.role;
+    req.session.pendingInviteToken = null;
+    await saveSession(req);
+    res.json({ redirect: '/editor.html' });
+  } catch (error) {
+    const known = /invitación|No se pudo validar la invitación/i.test(error.message || '');
+    if (known) return res.status(403).json({ error: error.message });
+    console.error('Room unlock error:', error.message);
+    res.status(500).json({ error: 'No se pudo validar el acceso a la sala.' });
+  }
 });
 
 app.post('/auth/logout', (req, res) => {
@@ -1094,6 +1276,10 @@ wss.on('connection', (ws, req) => {
           if (!req.session.user || !req.session.projectId) return ws.close(1008, 'Iniciá sesión con Twitch');
           const membership = await getActiveMembership(req.session.projectId, req.session.user.id);
           if (!membership) return ws.close(1008, 'No tenés acceso a este proyecto');
+          const roomSecurity = await getProjectRoomSecurity(req.session.projectId);
+          if (!roomSecurity || !hasVerifiedRoomAccess(req.session, roomSecurity)) {
+            return ws.close(1008, 'Contraseña de sala requerida');
+          }
           ws.role = 'editor';
           ws.twitchId = req.session.user.id;
           ws.projectId = req.session.projectId;
