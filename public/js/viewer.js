@@ -355,8 +355,14 @@ function drawImageObject(img) {
     imageCache.set(img.url, image);
   }
   try {
-    if (img.width && img.height) ctx.drawImage(image, img.x, img.y, img.width, img.height);
-    else ctx.drawImage(image, img.x, img.y);
+    const width = img.width || 300, height = img.height || 200;
+    const centerX = (img.x || 0) + width / 2, centerY = (img.y || 0) + height / 2;
+    ctx.save();
+    ctx.translate(centerX, centerY);
+    ctx.rotate((Number(img.rotation) || 0) * Math.PI / 180);
+    ctx.scale(img.flipX ? -1 : 1, 1);
+    ctx.drawImage(image, -width / 2, -height / 2, width, height);
+    ctx.restore();
   } catch (e) { /* noop */ }
 }
 
@@ -380,6 +386,8 @@ function updateDomImages() {
     el.style.top = (img.y || 0) + 'px';
     el.style.width = (img.width || 300) + 'px';
     el.style.height = (img.height || 200) + 'px';
+    el.style.transformOrigin = 'center center';
+    el.style.transform = `rotate(${Number(img.rotation) || 0}deg) scaleX(${img.flipX ? -1 : 1})`;
     el.style.visibility = 'visible';
     used.add(img.id);
   }

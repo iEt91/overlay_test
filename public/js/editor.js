@@ -64,7 +64,9 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (msg.type === 'image:update' && msg.payload) {
           const index = STATE.images.findIndex(img => img.id === msg.payload.id);
           if (index >= 0) STATE.images[index] = { ...STATE.images[index], ...msg.payload };
-          updateCanvasImagesUI(); redraw();
+          // La posición cambia muchas veces mientras se arrastra. No
+          // reconstruimos la biblioteca en cada mensaje: sólo redibujamos.
+          redraw();
         } else if (msg.type === 'image:remove' && msg.payload) {
           STATE.images = STATE.images.filter(img => img.id !== msg.payload.id);
           updateCanvasImagesUI(); redraw();
@@ -448,7 +450,68 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // pointer/drawing
     let drawing=false, currentStroke=null;
-    let selectedImageId=null, selectedTextId=null, selectedTimerId=null, draggingImage=false, draggingText=false, draggingTimer=false, dragStart=null, resizing=false, resizingText=false, resizingTimer=false, resizeStart=null;
+    let selectedImageId=null, selectedTextId=null, selectedTimerId=null, draggingImage=false, draggingText=false, draggingTimer=false, rotatingImage=false, dragStart=null, resizing=false, resizingText=false, resizingTimer=false, resizeStart=null;
+    let pendingImageUpdate = null, imageUpdateTimer = null, lastImageUpdateAt = 0;
+    const IMAGE_SYNC_INTERVAL = 65;
+
+    function sendImageUpdate(img) {
+      if (!img || socket.readyState !== WebSocket.OPEN) return;
+      try { socket.send(JSON.stringify({ type: 'image:update', payload: { ...img } })); } catch (e) {}
+    }
+
+    function queueImageUpdate(img, immediate = false) {
+      if (!img) return;
+      pendingImageUpdate = { ...img };
+      if (immediate) {
+        if (imageUpdateTimer) { clearTimeout(imageUpdateTimer); imageUpdateTimer = null; }
+        const next = pendingImageUpdate; pendingImageUpdate = null;
+        lastImageUpdateAt = Date.now();
+        sendImageUpdate(next);
+        return;
+      }
+      if (imageUpdateTimer) return;
+      const wait = Math.max(0, IMAGE_SYNC_INTERVAL - (Date.now() - lastImageUpdateAt));
+      imageUpdateTimer = setTimeout(() => {
+        imageUpdateTimer = null;
+        const next = pendingImageUpdate; pendingImageUpdate = null;
+        if (next) { lastImageUpdateAt = Date.now(); sendImageUpdate(next); }
+      }, wait);
+    }
+
+    function flushImageUpdate() {
+      if (imageUpdateTimer) { clearTimeout(imageUpdateTimer); imageUpdateTimer = null; }
+      if (!pendingImageUpdate) return;
+      const next = pendingImageUpdate; pendingImageUpdate = null;
+      lastImageUpdateAt = Date.now();
+      sendImageUpdate(next);
+    }
+
+    function imageGeometry(img) {
+      const width = img.width || 300, height = img.height || 200;
+      const centerWorld = { x: (img.x || 0) + width / 2, y: (img.y || 0) + height / 2 };
+      const center = worldToScreen(centerWorld);
+      const angle = Number(img.rotation) || 0;
+      const radians = angle * Math.PI / 180;
+      const cos = Math.cos(radians), sin = Math.sin(radians);
+      const point = (x, y) => ({ x: center.x + x * cos - y * sin, y: center.y + x * sin + y * cos });
+      const screenWidth = width * transform.scale, screenHeight = height * transform.scale;
+      return {
+        width, height, centerWorld, center, radians, screenWidth, screenHeight, point,
+        eye: point(screenWidth / 2 + 19, -screenHeight / 2 - 17),
+        resize: point(screenWidth / 2 - 12, screenHeight / 2 - 12),
+        rotate: point(0, -screenHeight / 2 - 38)
+      };
+    }
+
+    function imageContainsWorldPoint(img, point) {
+      const geometry = imageGeometry(img);
+      const dx = point.x - geometry.centerWorld.x, dy = point.y - geometry.centerWorld.y;
+      const cos = Math.cos(-geometry.radians), sin = Math.sin(-geometry.radians);
+      const localX = dx * cos - dy * sin, localY = dx * sin + dy * cos;
+      return Math.abs(localX) <= geometry.width / 2 && Math.abs(localY) <= geometry.height / 2;
+    }
+
+    function distanceBetween(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
     canvas.addEventListener('pointerdown', (e) => {
       try {
@@ -495,20 +558,21 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           for (let i = STATE.images.length - 1; i >= 0; i--) {
             const img = STATE.images[i];
-            const imgS = worldToScreen({ x: img.x, y: img.y });
-            const sW = (img.width || 300) * transform.scale;
-            const sH = (img.height || 200) * transform.scale;
-            const toggleX = imgS.x + sW + 6, toggleY = imgS.y - 30;
-            if (screenPos.x >= toggleX && screenPos.x <= toggleX + 26 && screenPos.y >= toggleY && screenPos.y <= toggleY + 26) {
+            const geometry = imageGeometry(img);
+            if (distanceBetween(screenPos, geometry.eye) <= 19) {
               img.viewerVisible = !img.viewerVisible;
-              try { socket.send(JSON.stringify({ type: 'image:update', payload: img })); } catch(e) {}
+              queueImageUpdate(img, true);
               updateCanvasImagesUI(); redraw(); return;
             }
-            const handleSize = 30, hx = imgS.x + sW - handleSize, hy = imgS.y + sH - handleSize;
-            if (screenPos.x >= hx && screenPos.x <= imgS.x + sW + 8 && screenPos.y >= hy && screenPos.y <= imgS.y + sH + 8) {
+            if (distanceBetween(screenPos, geometry.rotate) <= 18) {
+              selectedImageId = img.id; selectedTextId = null; selectedTimerId = null; rotatingImage = true;
+              resizeStart = { rotation: Number(img.rotation) || 0, pointerAngle: Math.atan2(worldPos.y - geometry.centerWorld.y, worldPos.x - geometry.centerWorld.x) };
+              canvas.setPointerCapture?.(e.pointerId); redraw(); return;
+            }
+            if (distanceBetween(screenPos, geometry.resize) <= 20) {
               selectedImageId = img.id; selectedTextId = null; selectedTimerId = null; resizing = true; resizeStart = { mouse: screenPos, imgStart: { width: img.width || 300, height: img.height || 200 } }; return;
             }
-            if (screenPos.x >= imgS.x && screenPos.x <= imgS.x + sW && screenPos.y >= imgS.y && screenPos.y <= imgS.y + sH) {
+            if (imageContainsWorldPoint(img, worldPos)) {
               selectedImageId = img.id; selectedTextId = null; selectedTimerId = null; draggingImage = true;
               const offsetWorld = { x: worldPos.x - img.x, y: worldPos.y - img.y };
               dragStart = { mouse: screenPos, imgStart: { x: img.x, y: img.y }, offsetWorld }; return;
@@ -546,9 +610,21 @@ document.addEventListener('DOMContentLoaded', () => {
           const img = STATE.images.find(x=>x.id===selectedImageId); if(!img) return;
           const dx = (screenPos.x - resizeStart.mouse.x)/transform.scale;
           const dy = (screenPos.y - resizeStart.mouse.y)/transform.scale;
-          img.width = Math.max(10, resizeStart.imgStart.width + dx);
-          img.height = Math.max(10, resizeStart.imgStart.height + dy);
-          try { socket.send(JSON.stringify({ type:'image:update', payload: img })); } catch(e){}
+          const angle = (Number(img.rotation) || 0) * Math.PI / 180;
+          const localX = dx * Math.cos(angle) + dy * Math.sin(angle);
+          const localY = -dx * Math.sin(angle) + dy * Math.cos(angle);
+          img.width = Math.max(10, resizeStart.imgStart.width + localX);
+          img.height = Math.max(10, resizeStart.imgStart.height + localY);
+          queueImageUpdate(img);
+          redraw(); return;
+        }
+
+        if (rotatingImage && selectedImageId) {
+          const img = STATE.images.find(x => x.id === selectedImageId); if (!img) return;
+          const geometry = imageGeometry(img);
+          const pointerAngle = Math.atan2(worldPos.y - geometry.centerWorld.y, worldPos.x - geometry.centerWorld.x);
+          img.rotation = Math.round(((resizeStart.rotation + (pointerAngle - resizeStart.pointerAngle) * 180 / Math.PI) % 360 + 360) % 360);
+          queueImageUpdate(img);
           redraw(); return;
         }
 
@@ -585,7 +661,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const img = STATE.images.find(x=>x.id===selectedImageId); if(!img) return;
           img.x = worldPos.x - dragStart.offsetWorld.x;
           img.y = worldPos.y - dragStart.offsetWorld.y;
-          try { socket.send(JSON.stringify({ type:'image:update', payload: img })); } catch(e){}
+          queueImageUpdate(img);
           redraw(); return;
         }
 
@@ -600,17 +676,18 @@ document.addEventListener('DOMContentLoaded', () => {
     canvas.addEventListener('pointerup', (e) => {
       try {
         if (isPanning && e.button===1) { isPanning=false; canvas.style.cursor='default'; return; }
-        if (resizing) { resizing=false; resizeStart=null; return; }
+        if (resizing) { resizing=false; resizeStart=null; flushImageUpdate(); return; }
+        if (rotatingImage) { rotatingImage=false; resizeStart=null; flushImageUpdate(); return; }
         if (resizingText) { resizingText=false; resizeStart=null; return; }
         if (resizingTimer) { resizingTimer=false; resizeStart=null; return; }
-        if (draggingImage) { draggingImage=false; dragStart=null; return; }
+        if (draggingImage) { draggingImage=false; dragStart=null; flushImageUpdate(); return; }
         if (draggingText) { draggingText=false; dragStart=null; return; }
         if (draggingTimer) { draggingTimer=false; dragStart=null; return; }
         if (drawing) { drawing=false; try{ socket.send(JSON.stringify({ type:'stroke:end', payload:{ id: currentStroke ? currentStroke.id : null } })); }catch(e){} currentStroke=null; }
       } catch (err) { console.error('pointerup err', err); }
     });
 
-    canvas.addEventListener('pointercancel', ()=> { isPanning=false; resizing=false; resizingText=false; resizingTimer=false; draggingImage=false; draggingText=false; draggingTimer=false; drawing=false; currentStroke=null; });
+    canvas.addEventListener('pointercancel', ()=> { flushImageUpdate(); isPanning=false; resizing=false; rotatingImage=false; resizingText=false; resizingTimer=false; draggingImage=false; draggingText=false; draggingTimer=false; drawing=false; currentStroke=null; });
 
     viewportWrap.addEventListener('wheel', (e) => {
       try {
@@ -648,21 +725,26 @@ document.addEventListener('DOMContentLoaded', () => {
         if (selectedImageId) {
           const img = STATE.images.find(x => x.id === selectedImageId);
           if (img) {
-            const sPos = worldToScreen({ x: img.x, y: img.y });
-            const sW = (img.width || 300) * transform.scale;
-            const sH = (img.height || 200) * transform.scale;
+            const geometry = imageGeometry(img);
+            const sW = geometry.screenWidth, sH = geometry.screenHeight;
             ctx.save();
+            ctx.translate(geometry.center.x, geometry.center.y);
+            ctx.rotate(geometry.radians);
             ctx.strokeStyle = '#00ffcc'; ctx.lineWidth = 2;
-            ctx.strokeRect(sPos.x, sPos.y, sW, sH);
+            ctx.strokeRect(-sW / 2, -sH / 2, sW, sH);
             ctx.fillStyle = '#00ffcc';
-            ctx.fillRect(sPos.x + sW - 24, sPos.y + sH - 24, 22, 22);
+            ctx.fillRect(sW / 2 - 24, sH / 2 - 24, 22, 22);
             ctx.fillStyle = '#071826'; ctx.font = '16px sans-serif';
-            ctx.fillText('↘', sPos.x + sW - 21, sPos.y + sH - 6);
-            // Botón siempre pegado a la esquina superior derecha de la imagen.
+            ctx.fillText('↘', sW / 2 - 21, sH / 2 - 6);
+            // Control de rotación: palito superior y círculo arrastrable.
+            ctx.beginPath(); ctx.moveTo(0, -sH / 2); ctx.lineTo(0, -sH / 2 - 29); ctx.stroke();
+            ctx.beginPath(); ctx.arc(0, -sH / 2 - 38, 9, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#071826'; ctx.lineWidth = 2; ctx.stroke();
+            // Botón de visibilidad pegado a la esquina superior derecha.
             ctx.fillStyle = 'rgba(2,6,18,.94)';
-            ctx.fillRect(sPos.x + sW + 6, sPos.y - 30, 26, 26);
-            ctx.strokeStyle = '#00ffcc'; ctx.strokeRect(sPos.x + sW + 6, sPos.y - 30, 26, 26);
-            drawVisibilityIcon(sPos.x + sW + 6, sPos.y - 30, img.viewerVisible !== false);
+            ctx.fillRect(sW / 2 + 6, -sH / 2 - 30, 26, 26);
+            ctx.strokeStyle = '#00ffcc'; ctx.strokeRect(sW / 2 + 6, -sH / 2 - 30, 26, 26);
+            drawVisibilityIcon(sW / 2 + 6, -sH / 2 - 30, img.viewerVisible !== false);
             ctx.restore();
           }
         }
@@ -704,9 +786,13 @@ document.addEventListener('DOMContentLoaded', () => {
     function drawImageOnCanvas(img) {
       let image = imageCache.get(img.url);
       if (!image) { image = new Image(); image.crossOrigin='anonymous'; image.src = img.url; imageCache.set(img.url,image); }
-      const sPos = worldToScreen({ x: img.x, y: img.y });
-      const sW = (img.width || 300) * transform.scale; const sH = (img.height || 200) * transform.scale;
-      try { ctx.drawImage(image, sPos.x, sPos.y, sW, sH); } catch(e){}
+      const geometry = imageGeometry(img);
+      try {
+        ctx.save(); ctx.translate(geometry.center.x, geometry.center.y); ctx.rotate(geometry.radians);
+        ctx.scale(img.flipX ? -1 : 1, 1);
+        ctx.drawImage(image, -geometry.screenWidth / 2, -geometry.screenHeight / 2, geometry.screenWidth, geometry.screenHeight);
+        ctx.restore();
+      } catch(e){}
     }
 
     // DOM image overlays used for GIFs (and handled in same flow for simplicity)
@@ -737,6 +823,8 @@ document.addEventListener('DOMContentLoaded', () => {
         el.style.top = Math.round(screenPos.y) + 'px';
         el.style.width = Math.max(1, Math.round(sW)) + 'px';
         el.style.height = Math.max(1, Math.round(sH)) + 'px';
+        el.style.transformOrigin = 'center center';
+        el.style.transform = `rotate(${Number(img.rotation) || 0}deg) scaleX(${img.flipX ? -1 : 1})`;
         el.style.visibility = 'visible';
         used.add(img.id);
       }
@@ -1033,7 +1121,7 @@ document.addEventListener('DOMContentLoaded', () => {
         imagesList.appendChild(el);
         el.querySelector('.btn-add').addEventListener('click', () => {
           // add outside safe zone (to the right)
-          const imgObj = { id: generateId(), url: a.url, x: 80, y: 80, width: 300, height: 200, viewerVisible: false };
+          const imgObj = { id: generateId(), url: a.url, x: 80, y: 80, width: 300, height: 200, rotation: 0, flipX: false, viewerVisible: false };
           STATE.images.push(imgObj);
           if (!imageCache.has(a.url)) { const im = new Image(); im.crossOrigin='anonymous'; im.src=a.url; imageCache.set(a.url,im); }
           try { socket.send(JSON.stringify({ type:'image:add', payload: imgObj })); } catch(e){}
@@ -1073,6 +1161,10 @@ document.addEventListener('DOMContentLoaded', () => {
       return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.2-5.5 9.5-5.5S21.5 12 21.5 12s-3.2 5.5-9.5 5.5S2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.4" />${slash}</svg>`;
     }
 
+    function mirrorIconMarkup() {
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14M9 8l7 4-7 4V8ZM19 5v14" /></svg>';
+    }
+
     function updateCanvasImagesUI() {
       if (!canvasImagesList) return;
       canvasImagesList.innerHTML = '';
@@ -1080,9 +1172,10 @@ document.addEventListener('DOMContentLoaded', () => {
       STATE.images.forEach(img => {
         const row = document.createElement('div'); row.className = 'canvas-object';
         const visible = img.viewerVisible !== false;
-        row.innerHTML = `<span class="object-name">${imageName(img)}</span><button class="select">Seleccionar</button><button class="toggle eye-toggle" title="${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}" aria-label="${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}">${visibilityIconMarkup(visible)}</button><button class="remove">✖</button>`;
+        row.innerHTML = `<span class="object-name">${imageName(img)}</span><button class="select">Seleccionar</button><button class="toggle eye-toggle" title="${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}" aria-label="${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}">${visibilityIconMarkup(visible)}</button><button class="flip mirror-toggle" title="Voltear horizontalmente" aria-label="Voltear horizontalmente">${mirrorIconMarkup()}</button><button class="remove">✖</button>`;
         row.querySelector('.select').addEventListener('click', () => { selectedImageId = img.id; setTool('select'); redraw(); });
-        row.querySelector('.toggle').addEventListener('click', () => { img.viewerVisible = !visible; try { socket.send(JSON.stringify({ type: 'image:update', payload: img })); } catch(e) {} updateCanvasImagesUI(); redraw(); });
+        row.querySelector('.toggle').addEventListener('click', () => { img.viewerVisible = !visible; queueImageUpdate(img, true); updateCanvasImagesUI(); redraw(); });
+        row.querySelector('.flip').addEventListener('click', () => { img.flipX = !img.flipX; queueImageUpdate(img, true); redraw(); });
         row.querySelector('.remove').addEventListener('click', () => { STATE.images = STATE.images.filter(item => item.id !== img.id); if (selectedImageId === img.id) selectedImageId = null; try { socket.send(JSON.stringify({ type: 'image:remove', payload: { id: img.id } })); } catch(e) {} updateCanvasImagesUI(); redraw(); });
         canvasImagesList.appendChild(row);
       });

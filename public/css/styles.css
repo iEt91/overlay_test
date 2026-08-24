@@ -148,8 +148,8 @@ input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); ou
 .lib-item button:hover, .canvas-object button:hover { border-color: var(--accent); color: #edffff; }
 .canvas-object .object-name { flex: 1; overflow: hidden; color: #c6d2d1; font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
 .audio-slot-label { color: #7f9a98; font-size: 10px; white-space: nowrap; }
-.canvas-object .eye-toggle { display: grid; place-items: center; width: 28px; min-width: 28px; padding: 4px; }
-.eye-toggle svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.canvas-object .eye-toggle, .canvas-object .mirror-toggle { display: grid; place-items: center; width: 28px; min-width: 28px; padding: 4px; }
+.eye-toggle svg, .mirror-toggle svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .activity-list { display: grid; gap: 0; max-height: 260px; overflow-y: auto; border-top: 1px solid #2a3637; }
 .activity-item { display: grid; gap: 3px; padding: 10px 0; border-bottom: 1px solid #2a3637; }
 .activity-item strong { color: #dce7e5; font-size: 11px; font-weight: 650; }

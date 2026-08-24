@@ -1062,7 +1062,10 @@ wss.on('connection', (ws, req) => {
             STATE.updatedAt = Date.now();
           }
         }
-        broadcastWS({ type: 'snapshot', state: STATE }, null);
+        // Durante el arrastre se reciben muchas actualizaciones. Reenviamos
+        // sólo la imagen modificada a los demás clientes: el autor ya la
+        // actualizó localmente y una escena completa por píxel genera lag.
+        broadcastWS({ type: 'image:update', payload: data.payload }, ws);
         break;
       case 'image:remove':
         if (data.payload && data.payload.id) {
