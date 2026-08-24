@@ -184,6 +184,9 @@ function emptySceneContent() {
     texts: [],
     timers: [],
     audio: { current: null, playlist: [], slots: {} },
+    // La biblioteca de sonidos es parte de la escena, igual que sus slots.
+    // Así una escena no hereda los audios cargados en otra.
+    audioAssets: [],
     viewport: { x: 0, y: 0, width: 1920, height: 1080, scale: 1 },
     volume: 1,
     updatedAt: Date.now()
@@ -202,6 +205,7 @@ function normalizeSceneContent(incoming, fallback = emptySceneContent()) {
     texts: Array.isArray(value.texts) ? value.texts : fallback.texts,
     timers: Array.isArray(value.timers) ? value.timers : fallback.timers,
     audio: value.audio && typeof value.audio === 'object' ? value.audio : fallback.audio,
+    audioAssets: Array.isArray(value.audioAssets) ? value.audioAssets : fallback.audioAssets,
     viewport: value.viewport && typeof value.viewport === 'object' ? value.viewport : fallback.viewport,
     volume: typeof value.volume === 'number' ? Math.max(0, Math.min(1, value.volume)) : fallback.volume,
     updatedAt: Date.now()
@@ -257,9 +261,13 @@ function activeSceneFromDeck(deck) {
 
 function materializeScene(deck, assets) {
   const activeScene = activeSceneFromDeck(deck);
+  const content = normalizeSceneContent(activeScene.state);
+  const globalAssets = normalizeAssets(assets);
   return {
-    ...normalizeSceneContent(activeScene.state),
-    assets: normalizeAssets(assets),
+    ...content,
+    // Las imágenes permanecen en una biblioteca común; los audios se obtienen
+    // de la escena activa para que el soundboard sea independiente.
+    assets: { images: globalAssets.images, audio: content.audioAssets },
     sceneDeck: deck,
     updatedAt: Date.now()
   };
@@ -273,7 +281,11 @@ function emptyScene() {
 function syncActiveSceneToDeck(state) {
   const deck = normalizeSceneDeck(state.sceneDeck, normalizeSceneContent(state));
   const activeScene = activeSceneFromDeck(deck);
-  activeScene.state = normalizeSceneContent(state, activeScene.state);
+  const content = normalizeSceneContent(state, activeScene.state);
+  content.audioAssets = Array.isArray(state.assets && state.assets.audio)
+    ? state.assets.audio
+    : activeScene.state.audioAssets;
+  activeScene.state = content;
   state.sceneDeck = deck;
   state.updatedAt = Date.now();
   return state;
@@ -290,8 +302,22 @@ function normalizeScene(incoming, fallback = emptyScene()) {
   const value = incoming && typeof incoming === 'object' ? incoming : {};
   const fallbackState = fallback && typeof fallback === 'object' ? fallback : emptyScene();
   const legacyContent = normalizeSceneContent(value, normalizeSceneContent(fallbackState));
+  // Migración silenciosa: los proyectos anteriores tenían una única biblioteca
+  // de audio global. La conservamos dentro de Escena 1, sin copiarla a las demás.
+  if (!value.sceneDeck && value.assets && Array.isArray(value.assets.audio)) {
+    legacyContent.audioAssets = value.assets.audio;
+  }
   const deck = normalizeSceneDeck(value.sceneDeck, legacyContent);
-  return materializeScene(deck, normalizeAssets(value.assets, fallbackState.assets));
+  const assets = normalizeAssets(value.assets, fallbackState.assets);
+  // También cubre estados guardados por la primera versión de escenas, donde
+  // el deck ya existía pero la biblioteca de audio aún era global.
+  const storedActiveScene = value.sceneDeck && Array.isArray(value.sceneDeck.scenes)
+    ? value.sceneDeck.scenes.find(scene => scene && scene.id === deck.activeSceneId)
+    : null;
+  if (Array.isArray(assets.audio) && (!storedActiveScene || !Array.isArray(storedActiveScene.state && storedActiveScene.state.audioAssets))) {
+    activeSceneFromDeck(deck).state.audioAssets = assets.audio;
+  }
+  return materializeScene(deck, { images: assets.images, audio: [] });
 }
 
 // El cliente sólo puede actualizar la composición activa: las otras escenas se
@@ -299,8 +325,12 @@ function normalizeScene(incoming, fallback = emptyScene()) {
 function applyActiveSceneSnapshot(incoming, fallback) {
   const state = normalizeScene(fallback);
   const content = normalizeSceneContent(incoming, normalizeSceneContent(state));
+  if (incoming && incoming.assets && Array.isArray(incoming.assets.audio)) {
+    content.audioAssets = incoming.assets.audio;
+  }
   Object.assign(state, content);
-  state.assets = normalizeAssets(incoming && incoming.assets, state.assets);
+  const incomingAssets = normalizeAssets(incoming && incoming.assets, state.assets);
+  state.assets = { images: incomingAssets.images, audio: content.audioAssets };
   return syncActiveSceneToDeck(state);
 }
 
@@ -988,6 +1018,9 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 function broadcastWS(obj, except = null, projectId = ACTIVE_PROJECT_ID) {
+  // Todas las instantáneas deben incluir el estado recién actualizado de la
+  // escena activa. Sin esto, la tarjeta de Escena 1 podía llegar desfasada.
+  if (obj && obj.type === 'snapshot' && obj.state) syncActiveSceneToDeck(obj.state);
   const raw = JSON.stringify(obj);
   wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN && client !== except && client.projectId === projectId && (client.role !== 'viewer' || client.overlayEnabled)) {
@@ -1220,15 +1253,14 @@ wss.on('connection', (ws, req) => {
         if (data.payload && data.payload.id) {
           syncActiveSceneToDeck(STATE);
           STATE.assets.audio = STATE.assets.audio.filter(x => x.id !== data.payload.id);
-          STATE.sceneDeck.scenes.forEach(scene => {
-            const audio = scene.state.audio || { current: null, playlist: [], slots: {} };
-            audio.playlist = (audio.playlist || []).filter(x => x.id !== data.payload.id);
-            Object.keys(audio.slots || {}).forEach(slot => {
-              if (audio.slots[slot] && audio.slots[slot].id === data.payload.id) delete audio.slots[slot];
-            });
-            if (audio.current && audio.current.url === data.payload.url) audio.current = null;
-            scene.state.audio = audio;
+          // El archivo sólo existe en la biblioteca de la escena actual, por
+          // eso sus asignaciones no deben modificar ninguna otra escena.
+          STATE.audio.playlist = (STATE.audio.playlist || []).filter(x => x.id !== data.payload.id);
+          Object.keys(STATE.audio.slots || {}).forEach(slot => {
+            if (STATE.audio.slots[slot] && STATE.audio.slots[slot].id === data.payload.id) delete STATE.audio.slots[slot];
           });
+          if (STATE.audio.current && STATE.audio.current.url === data.payload.url) STATE.audio.current = null;
+          syncActiveSceneToDeck(STATE);
           STATE = materializeScene(STATE.sceneDeck, STATE.assets);
           STATE.updatedAt = Date.now();
         }

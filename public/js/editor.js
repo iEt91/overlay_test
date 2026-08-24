@@ -22,6 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (msg.type === 'room:connected' && msg.payload) {
           updateRealtimeStatus(`En tiempo real · Sala ${msg.payload.roomCode || 'privada'}`);
         } else if (msg.type === 'snapshot' && msg.state) {
+          const previousAudioUrl = STATE.audio && STATE.audio.current && STATE.audio.current.url;
           if (msg.state.sceneDeck) STATE.sceneDeck = msg.state.sceneDeck;
           if (msg.state.assets) {
             STATE.assets = { images: [], audio: [], ...msg.state.assets };
@@ -36,6 +37,9 @@ document.addEventListener('DOMContentLoaded', () => {
           if (msg.state.timers) STATE.timers = msg.state.timers.map(timer => ({ ...timer }));
           if (msg.state.audio) {
             STATE.audio = { current: null, playlist: [], slots: {}, ...msg.state.audio };
+            // Al cambiar de escena, ningún sonido de la escena anterior debe
+            // seguir reproduciéndose localmente en segundo plano.
+            if (previousAudioUrl && (!STATE.audio.current || STATE.audio.current.url !== previousAudioUrl)) stopAllLocalAudio();
             updateAudioLibraryUI();
           }
           if (typeof msg.state.volume === 'number') {
@@ -165,6 +169,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const timerColor = document.getElementById('timerColor'); const timerFontSize = document.getElementById('timerFontSize'); const timerFont = document.getElementById('timerFont');
     const timerX = document.getElementById('timerX'); const timerY = document.getElementById('timerY'); const btnAddTimer = document.getElementById('btn-add-timer'); const timerList = document.getElementById('timerList');
     const sceneList = document.getElementById('sceneList');
+    const sceneShortcutButtons = document.querySelectorAll('[data-scene-shortcut]');
 
     const tabButtons = document.querySelectorAll('.tab-btn');
     const tabPanels = document.querySelectorAll('.tab-panel');
@@ -466,14 +471,31 @@ document.addEventListener('DOMContentLoaded', () => {
         button.className = `scene-card${scene.id === deck.activeSceneId ? ' active' : ''}`;
         button.setAttribute('aria-pressed', String(scene.id === deck.activeSceneId));
         button.innerHTML = `<span class="scene-number">${index + 1}</span><span class="scene-copy"><strong>${scene.name || `Escena ${index + 1}`}</strong><small>${sceneSummary(scene)}</small></span><span class="scene-status">${scene.id === deck.activeSceneId ? 'En vivo' : 'Cambiar'}</span>`;
-        button.addEventListener('click', () => {
-          if (scene.id === deck.activeSceneId) return;
-          if (socket.readyState !== WebSocket.OPEN) { alert('No hay conexión en tiempo real. Volvé a intentarlo en un momento.'); return; }
-          socket.send(JSON.stringify({ type: 'scene:activate', payload: { sceneId: scene.id } }));
-        });
+        button.addEventListener('click', () => activateScene(scene.id));
         sceneList.appendChild(button);
       });
+      updateSceneShortcuts();
     }
+
+    function updateSceneShortcuts() {
+      const deck = STATE.sceneDeck || {};
+      sceneShortcutButtons.forEach(button => {
+        const sceneId = button.dataset.sceneShortcut;
+        const isActive = sceneId === deck.activeSceneId;
+        button.classList.toggle('active', isActive);
+        button.setAttribute('aria-pressed', String(isActive));
+        button.title = isActive ? `Escena ${sceneId.slice(-1)} en vivo` : `Ir a Escena ${sceneId.slice(-1)}`;
+      });
+    }
+
+    function activateScene(sceneId) {
+      const deck = STATE.sceneDeck || {};
+      if (sceneId === deck.activeSceneId) return;
+      if (socket.readyState !== WebSocket.OPEN) { alert('No hay conexión en tiempo real. Volvé a intentarlo en un momento.'); return; }
+      socket.send(JSON.stringify({ type: 'scene:activate', payload: { sceneId } }));
+    }
+
+    sceneShortcutButtons.forEach(button => button.addEventListener('click', () => activateScene(button.dataset.sceneShortcut)));
 
     // tabs
     tabButtons.forEach(btn => {
