@@ -193,6 +193,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let activityRefreshTimer = null;
     let testPreviewChannel = sessionStorage.getItem('tango.test-preview-channel') || '';
     let chatDismissed = false;
+    let activeSlotPopover = null;
+    let activeSlotAnchor = null;
 
     function updateRealtimeStatus(message, offline = false) {
       if (!realtimeStatus || !roomSummary) return;
@@ -560,7 +562,8 @@ document.addEventListener('DOMContentLoaded', () => {
       return {
         width, height, centerWorld, center, radians, screenWidth, screenHeight, point,
         eye: point(screenWidth / 2 + 19, -screenHeight / 2 - 17),
-        mirror: point(screenWidth / 2 - 13, -screenHeight / 2 - 17),
+        remove: point(screenWidth / 2 - 13, -screenHeight / 2 - 17),
+        mirror: point(screenWidth / 2 - 45, -screenHeight / 2 - 17),
         resize: point(screenWidth / 2 - 12, screenHeight / 2 - 12),
         rotate: point(0, -screenHeight / 2 - 38)
       };
@@ -626,6 +629,10 @@ document.addEventListener('DOMContentLoaded', () => {
               img.flipX = !img.flipX;
               queueImageUpdate(img, true);
               updateCanvasImagesUI(); redraw(); return;
+            }
+            if (distanceBetween(screenPos, geometry.remove) <= 19) {
+              removeImageFromCanvas(img.id);
+              return;
             }
             if (distanceBetween(screenPos, geometry.eye) <= 19) {
               img.viewerVisible = !img.viewerVisible;
@@ -808,11 +815,16 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.beginPath(); ctx.moveTo(0, -sH / 2); ctx.lineTo(0, -sH / 2 - 29); ctx.stroke();
             ctx.beginPath(); ctx.arc(0, -sH / 2 - 38, 9, 0, Math.PI * 2); ctx.fill();
             ctx.strokeStyle = '#071826'; ctx.lineWidth = 2; ctx.stroke();
-            // Botón de visibilidad pegado a la esquina superior derecha.
+            // Acciones de imagen: espejo, quitar del canvas y visibilidad.
+            ctx.fillStyle = 'rgba(2,6,18,.94)';
+            ctx.fillRect(sW / 2 - 58, -sH / 2 - 30, 26, 26);
+            ctx.strokeStyle = '#00ffcc'; ctx.strokeRect(sW / 2 - 58, -sH / 2 - 30, 26, 26);
+            drawMirrorIcon(sW / 2 - 58, -sH / 2 - 30);
             ctx.fillStyle = 'rgba(2,6,18,.94)';
             ctx.fillRect(sW / 2 - 26, -sH / 2 - 30, 26, 26);
             ctx.strokeStyle = '#00ffcc'; ctx.strokeRect(sW / 2 - 26, -sH / 2 - 30, 26, 26);
-            drawMirrorIcon(sW / 2 - 26, -sH / 2 - 30);
+            drawTrashIcon(sW / 2 - 26, -sH / 2 - 30);
+            ctx.fillStyle = 'rgba(2,6,18,.94)';
             ctx.fillRect(sW / 2 + 6, -sH / 2 - 30, 26, 26);
             ctx.strokeStyle = '#00ffcc'; ctx.strokeRect(sW / 2 + 6, -sH / 2 - 30, 26, 26);
             drawVisibilityIcon(sW / 2 + 6, -sH / 2 - 30, img.viewerVisible !== false);
@@ -982,6 +994,17 @@ document.addEventListener('DOMContentLoaded', () => {
       ctx.strokeStyle = '#e6eef6'; ctx.lineWidth = 1.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
       ctx.beginPath(); ctx.moveTo(x + 6, y + 5); ctx.lineTo(x + 6, y + 21);
       ctx.moveTo(x + 10, y + 8); ctx.lineTo(x + 18, y + 13); ctx.lineTo(x + 10, y + 18);
+      ctx.stroke(); ctx.restore();
+    }
+    function drawTrashIcon(x, y) {
+      ctx.save();
+      ctx.strokeStyle = '#e6eef6'; ctx.lineWidth = 1.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x + 6, y + 8); ctx.lineTo(x + 20, y + 8);
+      ctx.moveTo(x + 10, y + 8); ctx.lineTo(x + 11, y + 20); ctx.lineTo(x + 17, y + 20); ctx.lineTo(x + 18, y + 8);
+      ctx.moveTo(x + 11, y + 5); ctx.lineTo(x + 17, y + 5);
+      ctx.moveTo(x + 13, y + 12); ctx.lineTo(x + 13, y + 17);
+      ctx.moveTo(x + 16, y + 12); ctx.lineTo(x + 16, y + 17);
       ctx.stroke(); ctx.restore();
     }
     function getTimerDisplay(item) {
@@ -1233,37 +1256,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateAudioLibraryUI() {
+      closeSlotPopover();
       audioList.innerHTML = '';
       STATE.assets.audio.forEach(a => {
         const slots = Object.entries(STATE.audio.slots || {})
           .filter(([, assigned]) => assigned && (assigned.id === a.id || assigned.url === a.url))
           .map(([slot]) => slot);
-        const slotLabel = slots.length ? `Slot${slots.length > 1 ? 's' : ''}: ${slots.join(', ')}` : 'Sin asignar';
         const el = document.createElement('div'); el.className = 'lib-item audio-library-item';
         el.draggable = true;
         const main = document.createElement('div'); main.className = 'library-item-main';
         const details = document.createElement('div'); details.className = 'library-item-details';
         const name = document.createElement('small'); name.className = 'library-item-name'; name.textContent = a.name; name.title = a.name;
-        const label = document.createElement('small'); label.className = 'audio-slot-label'; label.textContent = slotLabel; label.title = slotLabel;
         const actions = document.createElement('div'); actions.className = 'library-actions';
-        const assign = createLibraryButton('slot-assign', 'Asignar a un slot', slotIconMarkup());
+        const assignedSlotText = slots.length === 1 ? slots[0] : (slots.length > 1 ? `${slots[0]}+` : '');
+        const assignTitle = slots.length ? `Asignado a: ${slots.join(', ')}. Cambiar slot` : 'Asignar a un slot';
+        const assign = createLibraryButton('slot-assign', assignTitle, assignedSlotText || slotIconMarkup());
+        assign.classList.toggle('has-slot', Boolean(assignedSlotText));
         const remove = createLibraryButton('btn-delete asset-delete', 'Eliminar audio de esta escena', trashIconMarkup());
-        const slotMenu = document.createElement('div'); slotMenu.className = 'slot-menu'; slotMenu.hidden = true;
-        for (let slot = 0; slot <= 9; slot++) {
-          const slotButton = document.createElement('button');
-          slotButton.type = 'button'; slotButton.textContent = String(slot); slotButton.title = `Asignar a slot ${slot}`;
-          slotButton.addEventListener('click', event => {
-            event.stopPropagation();
-            STATE.audio.slots[String(slot)] = a;
-            slotMenu.hidden = true;
-            publishSnapshot(); updateSoundboardUI(); updateAudioLibraryUI();
-          });
-          slotMenu.appendChild(slotButton);
-        }
         assign.addEventListener('click', event => {
           event.stopPropagation();
-          audioList.querySelectorAll('.slot-menu').forEach(menu => { if (menu !== slotMenu) menu.hidden = true; });
-          slotMenu.hidden = !slotMenu.hidden;
+          if (activeSlotAnchor === assign) closeSlotPopover();
+          else openSlotPopover(assign, a);
         });
         remove.addEventListener('click', () => {
           const wasPlaying = STATE.audio.current && STATE.audio.current.url === a.url;
@@ -1277,11 +1290,44 @@ document.addEventListener('DOMContentLoaded', () => {
           try { socket.send(JSON.stringify({ type: 'asset:audio:delete', payload: a })); } catch (e) {}
           updateAudioLibraryUI(); updateSoundboardUI();
         });
-        details.append(name, label); actions.append(assign, remove); main.append(details, actions); el.append(main, slotMenu);
+        details.append(name); actions.append(assign, remove); main.append(details, actions); el.append(main);
         audioList.appendChild(el);
         el.addEventListener('dragstart', event => { event.dataTransfer.setData('text/plain', a.id); event.dataTransfer.effectAllowed = 'copy'; });
       });
     }
+
+    function closeSlotPopover() {
+      if (activeSlotPopover) activeSlotPopover.remove();
+      activeSlotPopover = null;
+      activeSlotAnchor = null;
+    }
+
+    function openSlotPopover(anchor, asset) {
+      closeSlotPopover();
+      const popover = document.createElement('div'); popover.className = 'slot-popover'; popover.setAttribute('role', 'menu');
+      for (let slot = 0; slot <= 9; slot++) {
+        const slotButton = document.createElement('button');
+        slotButton.type = 'button'; slotButton.textContent = String(slot); slotButton.title = `Asignar a slot ${slot}`;
+        slotButton.addEventListener('click', event => {
+          event.stopPropagation();
+          STATE.audio.slots[String(slot)] = asset;
+          closeSlotPopover();
+          publishSnapshot(); updateSoundboardUI(); updateAudioLibraryUI();
+        });
+        popover.appendChild(slotButton);
+      }
+      document.body.appendChild(popover);
+      const anchorBox = anchor.getBoundingClientRect();
+      const popoverBox = popover.getBoundingClientRect();
+      const left = Math.max(8, Math.min(anchorBox.right - popoverBox.width, window.innerWidth - popoverBox.width - 8));
+      const top = Math.max(8, Math.min(anchorBox.bottom + 6, window.innerHeight - popoverBox.height - 8));
+      popover.style.left = `${Math.round(left)}px`; popover.style.top = `${Math.round(top)}px`;
+      activeSlotPopover = popover; activeSlotAnchor = anchor;
+    }
+
+    document.addEventListener('pointerdown', event => {
+      if (activeSlotPopover && !activeSlotPopover.contains(event.target) && event.target !== activeSlotAnchor) closeSlotPopover();
+    }, true);
 
     function createLibraryButton(className, title, content) {
       const button = document.createElement('button');
@@ -1307,6 +1353,13 @@ document.addEventListener('DOMContentLoaded', () => {
       return '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 10h8M12 7v6M9 15h6" /></svg>';
     }
 
+    function removeImageFromCanvas(imageId) {
+      STATE.images = STATE.images.filter(item => item.id !== imageId);
+      if (selectedImageId === imageId) selectedImageId = null;
+      try { socket.send(JSON.stringify({ type: 'image:remove', payload: { id: imageId } })); } catch (e) {}
+      updateCanvasImagesUI(); redraw();
+    }
+
     function updateCanvasImagesUI() {
       if (!canvasImagesList) return;
       canvasImagesList.innerHTML = '';
@@ -1326,7 +1379,7 @@ document.addEventListener('DOMContentLoaded', () => {
         select.addEventListener('click', () => { selectedImageId = img.id; setTool('select'); redraw(); });
         toggle.addEventListener('click', () => { img.viewerVisible = !visible; queueImageUpdate(img, true); updateCanvasImagesUI(); redraw(); });
         flip.addEventListener('click', () => { img.flipX = !img.flipX; queueImageUpdate(img, true); redraw(); });
-        remove.addEventListener('click', () => { STATE.images = STATE.images.filter(item => item.id !== img.id); if (selectedImageId === img.id) selectedImageId = null; try { socket.send(JSON.stringify({ type: 'image:remove', payload: { id: img.id } })); } catch(e) {} updateCanvasImagesUI(); redraw(); });
+        remove.addEventListener('click', () => removeImageFromCanvas(img.id));
         canvasImagesList.appendChild(row);
       });
     }
