@@ -1227,14 +1227,16 @@ document.addEventListener('DOMContentLoaded', () => {
       STATE.assets.images.forEach(a => {
         const el = document.createElement('div'); el.className = 'lib-item';
         const main = document.createElement('div'); main.className = 'library-item-main';
-        const name = document.createElement('small'); name.className = 'library-item-name'; name.textContent = a.name; name.title = a.name;
+        const preview = document.createElement('img');
+        preview.className = 'library-thumbnail'; preview.src = a.url; preview.alt = a.name; preview.title = a.name;
+        preview.loading = 'lazy'; preview.addEventListener('error', () => { preview.classList.add('is-unavailable'); preview.alt = 'Vista previa no disponible'; });
         const actions = document.createElement('div'); actions.className = 'library-actions';
         const remove = createLibraryButton('btn-delete asset-delete', 'Eliminar de la biblioteca', trashIconMarkup());
         const add = createLibraryButton('btn-add', 'Agregar al canvas', '+');
         // La papelera quita el archivo de la biblioteca; el + queda a la
         // derecha para que sea la acción final y más habitual.
         actions.append(remove, add);
-        main.append(name, actions); el.append(main);
+        main.append(preview, actions); el.append(main);
         imagesList.appendChild(el);
         add.addEventListener('click', () => {
           // add outside safe zone (to the right)

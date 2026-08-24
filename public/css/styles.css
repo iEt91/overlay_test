@@ -166,6 +166,9 @@ input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); ou
 .lib-item button:hover, .canvas-object button:hover { border-color: var(--accent); color: #edffff; }
 .library-item-main { display: flex; align-items: center; gap: 7px; min-width: 0; width: 100%; }
 .library-item-details { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1; }
+.library-thumbnail { display: block; width: 48px; height: 36px; flex: 1 1 auto; min-width: 0; border: 1px solid #344344; border-radius: 4px; background: #172122; object-fit: contain; }
+.library-thumbnail:hover { border-color: var(--accent); }
+.library-thumbnail.is-unavailable { opacity: .35; }
 .library-item-name, .canvas-object .object-name { display: block; min-width: 0; flex: 1; overflow: hidden; color: #c6d2d1; font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
 .library-actions, .canvas-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
 .canvas-object .eye-toggle, .canvas-object .mirror-toggle, .canvas-object .canvas-remove, .lib-item .asset-delete, .lib-item .slot-assign { display: grid; place-items: center; width: 28px; min-width: 28px; padding: 4px; }
