@@ -36,6 +36,7 @@ const isProduction = process.env.NODE_ENV === 'production';
 const SESSION_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
 const ROOM_PASSWORD_MIN_LENGTH = 10;
 const ROOM_PASSWORD_MAX_LENGTH = 128;
+const EDITOR_WHITELIST_LIMIT = 2;
 const supabaseAdmin = SUPABASE_URL && SUPABASE_SECRET_KEY
   ? createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
@@ -486,7 +487,33 @@ async function validateProjectInvite(token, user) {
   }
 
   const existing = await getActiveMembership(invite.project_id, user.id);
+  // Un miembro ya activo conserva su acceso: su cuenta ya fue autorizada por
+  // el streamer en una invitación anterior. La whitelist protege las altas
+  // nuevas aunque se filtre el enlace y también se conozca la contraseña.
+  if (!existing) {
+    const allowed = await isEditorWhitelisted(invite.project_id, user.login);
+    if (!allowed) {
+      throw new Error('Tu cuenta de Twitch no está autorizada en la whitelist de esta sala.');
+    }
+  }
   return { invite, project: { id: invite.project_id }, existingRole: existing ? existing.role : null };
+}
+
+function normalizeTwitchLogin(value) {
+  if (typeof value !== 'string') return null;
+  const login = value.trim().replace(/^@/, '').toLowerCase();
+  return /^[a-z0-9_]{4,25}$/.test(login) ? login : null;
+}
+
+async function isEditorWhitelisted(projectId, login) {
+  const normalizedLogin = normalizeTwitchLogin(login);
+  if (!normalizedLogin) return false;
+  const result = await supabaseAdmin.from('project_editor_whitelist')
+    .select('id')
+    .eq('project_id', projectId)
+    .eq('twitch_login', normalizedLogin)
+    .maybeSingle();
+  return Boolean(databaseError(result, 'No se pudo validar la whitelist de la sala.'));
 }
 
 async function acceptProjectInvite(token, user) {
@@ -1130,6 +1157,79 @@ app.get('/api/project/members', requireEditorApi, async (req, res) => {
   }
 });
 
+app.get('/api/project/whitelist', requireOwnerApi, async (req, res) => {
+  try {
+    const result = await supabaseAdmin.from('project_editor_whitelist')
+      .select('twitch_login, created_at')
+      .eq('project_id', req.projectAccess.projectId)
+      .order('created_at', { ascending: true });
+    res.json({ entries: databaseError(result, 'No se pudo cargar la whitelist.') });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo cargar la whitelist.' });
+  }
+});
+
+app.post('/api/project/whitelist', requireOwnerApi, async (req, res) => {
+  const login = normalizeTwitchLogin(req.body && req.body.login);
+  if (!login) return res.status(400).json({ error: 'Escribí un usuario de Twitch válido, sin espacios ni URL.' });
+  if (login === normalizeTwitchLogin(req.session.user.login)) {
+    return res.status(400).json({ error: 'No hace falta agregar la cuenta del streamer a la whitelist.' });
+  }
+  try {
+    const projectId = req.projectAccess.projectId;
+    const currentResult = await supabaseAdmin.from('project_editor_whitelist')
+      .select('twitch_login')
+      .eq('project_id', projectId);
+    const current = databaseError(currentResult, 'No se pudo comprobar la whitelist.');
+    if (!current.some(entry => entry.twitch_login === login) && current.length >= EDITOR_WHITELIST_LIMIT) {
+      return res.status(409).json({ error: `La whitelist admite hasta ${EDITOR_WHITELIST_LIMIT} moderadores.` });
+    }
+    const inserted = await supabaseAdmin.from('project_editor_whitelist').upsert({
+      project_id: projectId,
+      twitch_login: login,
+      created_by_twitch_id: req.session.user.id
+    }, { onConflict: 'project_id,twitch_login', ignoreDuplicates: true });
+    databaseError(inserted, 'No se pudo añadir el usuario a la whitelist.');
+    recordAudit(projectId, req.session.user.id, 'member.whitelist_added', 'whitelist', login).catch(() => {});
+    res.status(201).json({ login });
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo añadir el usuario a la whitelist.' });
+  }
+});
+
+app.delete('/api/project/whitelist/:login', requireOwnerApi, async (req, res) => {
+  const login = normalizeTwitchLogin(req.params.login);
+  if (!login) return res.status(400).json({ error: 'Usuario de Twitch inválido.' });
+  try {
+    const projectId = req.projectAccess.projectId;
+    const userResult = await supabaseAdmin.from('twitch_users')
+      .select('twitch_id')
+      .eq('login', login)
+      .maybeSingle();
+    const memberUser = databaseError(userResult, 'No se pudo identificar al usuario de Twitch.');
+    const result = await supabaseAdmin.from('project_editor_whitelist').delete()
+      .eq('project_id', projectId)
+      .eq('twitch_login', login);
+    databaseError(result, 'No se pudo quitar el usuario de la whitelist.');
+    if (memberUser) {
+      const memberResult = await supabaseAdmin.from('project_members').update({ active: false })
+        .eq('project_id', projectId)
+        .eq('member_twitch_id', memberUser.twitch_id)
+        .eq('role', 'editor');
+      databaseError(memberResult, 'No se pudo revocar el acceso del moderador.');
+      wss.clients.forEach(client => {
+        if (client.role === 'editor' && client.projectId === projectId && client.twitchId === memberUser.twitch_id) {
+          client.close(4003, 'Acceso revocado');
+        }
+      });
+    }
+    recordAudit(projectId, req.session.user.id, 'member.whitelist_removed', 'whitelist', login).catch(() => {});
+    res.status(204).end();
+  } catch (_) {
+    res.status(503).json({ error: 'No se pudo quitar el usuario de la whitelist.' });
+  }
+});
+
 app.get('/api/project/audit', requireEditorApi, async (req, res) => {
   try {
     // Nunca se acepta un projectId desde el navegador: se usa exclusivamente
@@ -1164,6 +1264,13 @@ app.get('/api/project/audit', requireEditorApi, async (req, res) => {
 app.post('/api/project/invites', requireOwnerApi, async (req, res) => {
   try {
     const projectId = req.projectAccess.projectId;
+    const whitelistResult = await supabaseAdmin.from('project_editor_whitelist')
+      .select('id', { count: 'exact', head: true })
+      .eq('project_id', projectId);
+    databaseError(whitelistResult, 'No se pudo comprobar la whitelist.');
+    if (!(whitelistResult.count || 0)) {
+      return res.status(409).json({ error: 'Primero agregá al menos un moderador a la whitelist.' });
+    }
     const countResult = await supabaseAdmin.from('project_members')
       .select('*', { count: 'exact', head: true })
       .eq('project_id', projectId)
@@ -1190,11 +1297,22 @@ app.post('/api/project/invites', requireOwnerApi, async (req, res) => {
 app.delete('/api/project/members/:twitchId', requireOwnerApi, async (req, res) => {
   if (req.params.twitchId === req.session.user.id) return res.status(400).json({ error: 'El streamer no puede quitarse a sí mismo.' });
   try {
+    const userResult = await supabaseAdmin.from('twitch_users')
+      .select('login')
+      .eq('twitch_id', req.params.twitchId)
+      .maybeSingle();
+    const memberUser = databaseError(userResult, 'No se pudo identificar al invitado.');
     const result = await supabaseAdmin.from('project_members').update({ active: false })
       .eq('project_id', req.projectAccess.projectId)
       .eq('member_twitch_id', req.params.twitchId)
       .eq('role', 'editor');
     databaseError(result, 'No se pudo quitar el invitado.');
+    if (memberUser && memberUser.login) {
+      const whitelistResult = await supabaseAdmin.from('project_editor_whitelist').delete()
+        .eq('project_id', req.projectAccess.projectId)
+        .eq('twitch_login', memberUser.login.toLowerCase());
+      databaseError(whitelistResult, 'No se pudo revocar la whitelist del invitado.');
+    }
     wss.clients.forEach(client => {
       if (client.role === 'editor' && client.projectId === req.projectAccess.projectId && client.twitchId === req.params.twitchId) client.close(4003, 'Acceso revocado');
     });

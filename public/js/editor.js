@@ -156,6 +156,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnCloseChat = document.getElementById('btn-close-chat');
     const btnCreateInvite = document.getElementById('btn-create-invite');
     const inviteStatus = document.getElementById('inviteStatus');
+    const whitelistLogin = document.getElementById('whitelistLogin');
+    const btnAddWhitelist = document.getElementById('btn-add-whitelist');
+    const whitelistList = document.getElementById('whitelistList');
     const membersList = document.getElementById('membersList');
     const activityList = document.getElementById('activityList');
     const roomSummary = document.getElementById('roomSummary');
@@ -357,7 +360,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function loadProjectInfo() {
       try {
         renderProjectInfo(await apiRequest('/api/project'));
-        await Promise.all([loadMembers(), loadActivity()]);
+        await Promise.all([loadMembers(), loadWhitelist(), loadActivity()]);
       }
       catch (error) { if (accountSummary) accountSummary.textContent = error.message; }
     }
@@ -386,10 +389,35 @@ document.addEventListener('DOMContentLoaded', () => {
       try { const result = await apiRequest('/api/project/members'); renderMembers(result.members || []); }
       catch (_) { if (membersList) membersList.innerHTML = '<p class="small">No se pudo cargar los invitados.</p>'; }
     }
+    function renderWhitelist(entries) {
+      if (!whitelistList) return;
+      whitelistList.innerHTML = '';
+      if (!entries.length) {
+        whitelistList.innerHTML = '<p class="small">Todavía no agregaste moderadores autorizados.</p>';
+        return;
+      }
+      entries.forEach(entry => {
+        const row = document.createElement('div'); row.className = 'canvas-object';
+        const name = document.createElement('span'); name.className = 'object-name'; name.textContent = `@${entry.twitch_login}`;
+        const remove = document.createElement('button'); remove.className = 'remove'; remove.type = 'button'; remove.textContent = '×'; remove.title = 'Quitar de la whitelist y revocar acceso';
+        remove.addEventListener('click', async () => {
+          try { await apiRequest(`/api/project/whitelist/${encodeURIComponent(entry.twitch_login)}`, { method: 'DELETE' }); await loadWhitelist(); }
+          catch (error) { alert(error.message); }
+        });
+        row.append(name, remove); whitelistList.appendChild(row);
+      });
+    }
+    async function loadWhitelist() {
+      if (PROJECT_INFO?.role !== 'owner') return;
+      try { const result = await apiRequest('/api/project/whitelist'); renderWhitelist(result.entries || []); }
+      catch (_) { if (whitelistList) whitelistList.innerHTML = '<p class="small">No se pudo cargar la whitelist.</p>'; }
+    }
     const activityLabels = {
       'project.created': 'creó el proyecto',
       'member.invite_created': 'creó una invitación de moderador',
       'member.invite_accepted': 'aceptó una invitación',
+      'member.whitelist_added': 'autorizó a un moderador',
+      'member.whitelist_removed': 'quitó a un moderador autorizado',
       'room.password_set': 'protegió la sala con contraseña',
       'member.removed': 'quitó a un invitado',
       'overlay.panic_enabled': 'ocultó todo el overlay',
@@ -1094,6 +1122,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const result = await apiRequest('/api/project/invites', { method: 'POST' });
         await navigator.clipboard.writeText(result.inviteUrl);
         if (inviteStatus) inviteStatus.textContent = `Invitación copiada. Vence en ${result.expiresInDays} días.`;
+      } catch (error) { alert(error.message); }
+    });
+    btnAddWhitelist && btnAddWhitelist.addEventListener('click', async () => {
+      const login = whitelistLogin && whitelistLogin.value;
+      try {
+        const result = await apiRequest('/api/project/whitelist', { method: 'POST', body: JSON.stringify({ login }) });
+        if (whitelistLogin) whitelistLogin.value = '';
+        if (inviteStatus) inviteStatus.textContent = `@${result.login} fue agregado a la whitelist.`;
+        await loadWhitelist();
       } catch (error) { alert(error.message); }
     });
 

@@ -126,7 +126,11 @@
           <label class="toggle-row owner-only"><span>Chat de Twitch en el Editor</span><input id="chatEnabled" type="checkbox"><i aria-hidden="true"></i></label>
           <div class="section-divider"></div><h3>Invitados</h3>
           <button id="btn-create-invite" class="owner-only" type="button">Crear invitación de moderador</button>
-          <p id="inviteStatus" class="small">Máximo dos invitados activos por proyecto.</p>
+          <p id="inviteStatus" class="small">Creá una invitación individual para cada moderador autorizado. Máximo dos por proyecto.</p>
+          <h3 class="owner-only">Moderadores autorizados</h3>
+          <p class="small owner-only">Sólo estas cuentas pueden aceptar una invitación, aun si conocen el enlace y la contraseña.</p>
+          <div class="whitelist-entry owner-only"><input id="whitelistLogin" type="text" maxlength="25" autocomplete="off" spellcheck="false" placeholder="usuario_de_twitch"><button id="btn-add-whitelist" type="button">Agregar</button></div>
+          <div id="whitelistList" class="canvas-objects owner-only"></div>
           <div id="membersList" class="canvas-objects"></div>
           <div class="section-divider"></div><h3>Actividad reciente</h3>
           <p class="small">Últimos cambios realizados en esta escena.</p>
