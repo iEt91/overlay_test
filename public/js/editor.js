@@ -498,6 +498,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return {
         width, height, centerWorld, center, radians, screenWidth, screenHeight, point,
         eye: point(screenWidth / 2 + 19, -screenHeight / 2 - 17),
+        mirror: point(screenWidth / 2 - 13, -screenHeight / 2 - 17),
         resize: point(screenWidth / 2 - 12, screenHeight / 2 - 12),
         rotate: point(0, -screenHeight / 2 - 38)
       };
@@ -559,6 +560,11 @@ document.addEventListener('DOMContentLoaded', () => {
           for (let i = STATE.images.length - 1; i >= 0; i--) {
             const img = STATE.images[i];
             const geometry = imageGeometry(img);
+            if (distanceBetween(screenPos, geometry.mirror) <= 19) {
+              img.flipX = !img.flipX;
+              queueImageUpdate(img, true);
+              updateCanvasImagesUI(); redraw(); return;
+            }
             if (distanceBetween(screenPos, geometry.eye) <= 19) {
               img.viewerVisible = !img.viewerVisible;
               queueImageUpdate(img, true);
@@ -742,6 +748,9 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.strokeStyle = '#071826'; ctx.lineWidth = 2; ctx.stroke();
             // Botón de visibilidad pegado a la esquina superior derecha.
             ctx.fillStyle = 'rgba(2,6,18,.94)';
+            ctx.fillRect(sW / 2 - 26, -sH / 2 - 30, 26, 26);
+            ctx.strokeStyle = '#00ffcc'; ctx.strokeRect(sW / 2 - 26, -sH / 2 - 30, 26, 26);
+            drawMirrorIcon(sW / 2 - 26, -sH / 2 - 30);
             ctx.fillRect(sW / 2 + 6, -sH / 2 - 30, 26, 26);
             ctx.strokeStyle = '#00ffcc'; ctx.strokeRect(sW / 2 + 6, -sH / 2 - 30, 26, 26);
             drawVisibilityIcon(sW / 2 + 6, -sH / 2 - 30, img.viewerVisible !== false);
@@ -896,6 +905,13 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.beginPath(); ctx.moveTo(x + 5, y + 5); ctx.lineTo(x + 21, y + 21); ctx.stroke();
       }
       ctx.restore();
+    }
+    function drawMirrorIcon(x, y) {
+      ctx.save();
+      ctx.strokeStyle = '#e6eef6'; ctx.lineWidth = 1.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.moveTo(x + 6, y + 5); ctx.lineTo(x + 6, y + 21);
+      ctx.moveTo(x + 10, y + 8); ctx.lineTo(x + 18, y + 13); ctx.lineTo(x + 10, y + 18);
+      ctx.stroke(); ctx.restore();
     }
     function getTimerDisplay(item) {
       const elapsed = Math.max(0, Math.floor((Date.now() - item.startedAtServer) / 1000));
