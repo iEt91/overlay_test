@@ -175,21 +175,26 @@ function twitchConfigurationError(res) {
   return res.status(503).send('Falta configurar Twitch. Revisá el archivo .env local.');
 }
 
-function emptyScene() {
+const SCENE_LIMIT = 3;
+
+function emptySceneContent() {
   return {
     strokes: [],
     images: [],
     texts: [],
     timers: [],
     audio: { current: null, playlist: [], slots: {} },
-    assets: { images: [], audio: [] },
     viewport: { x: 0, y: 0, width: 1920, height: 1080, scale: 1 },
     volume: 1,
     updatedAt: Date.now()
   };
 }
 
-function normalizeScene(incoming, fallback = emptyScene()) {
+function emptyAssets() {
+  return { images: [], audio: [] };
+}
+
+function normalizeSceneContent(incoming, fallback = emptySceneContent()) {
   const value = incoming && typeof incoming === 'object' ? incoming : {};
   return {
     strokes: Array.isArray(value.strokes) ? value.strokes : fallback.strokes,
@@ -197,11 +202,106 @@ function normalizeScene(incoming, fallback = emptyScene()) {
     texts: Array.isArray(value.texts) ? value.texts : fallback.texts,
     timers: Array.isArray(value.timers) ? value.timers : fallback.timers,
     audio: value.audio && typeof value.audio === 'object' ? value.audio : fallback.audio,
-    assets: value.assets && typeof value.assets === 'object' ? value.assets : fallback.assets,
     viewport: value.viewport && typeof value.viewport === 'object' ? value.viewport : fallback.viewport,
     volume: typeof value.volume === 'number' ? Math.max(0, Math.min(1, value.volume)) : fallback.volume,
     updatedAt: Date.now()
   };
+}
+
+function normalizeAssets(incoming, fallback = emptyAssets()) {
+  const value = incoming && typeof incoming === 'object' ? incoming : {};
+  return {
+    images: Array.isArray(value.images) ? value.images : fallback.images,
+    audio: Array.isArray(value.audio) ? value.audio : fallback.audio
+  };
+}
+
+function sceneIdAt(index) {
+  return `scene-${index + 1}`;
+}
+
+function emptySceneDeck(firstScene = emptySceneContent()) {
+  return {
+    activeSceneId: 'scene-1',
+    scenes: Array.from({ length: SCENE_LIMIT }, (_, index) => ({
+      id: sceneIdAt(index),
+      name: `Escena ${index + 1}`,
+      state: index === 0 ? normalizeSceneContent(firstScene) : emptySceneContent()
+    }))
+  };
+}
+
+function normalizeSceneDeck(incoming, legacyContent) {
+  if (!incoming || typeof incoming !== 'object' || !Array.isArray(incoming.scenes)) {
+    return emptySceneDeck(legacyContent);
+  }
+  const fallback = emptySceneContent();
+  const scenes = Array.from({ length: SCENE_LIMIT }, (_, index) => {
+    const id = sceneIdAt(index);
+    const supplied = incoming.scenes.find(scene => scene && scene.id === id);
+    return {
+      id,
+      name: `Escena ${index + 1}`,
+      state: normalizeSceneContent(supplied && supplied.state, fallback)
+    };
+  });
+  const activeSceneId = scenes.some(scene => scene.id === incoming.activeSceneId)
+    ? incoming.activeSceneId
+    : 'scene-1';
+  return { activeSceneId, scenes };
+}
+
+function activeSceneFromDeck(deck) {
+  return deck.scenes.find(scene => scene.id === deck.activeSceneId) || deck.scenes[0];
+}
+
+function materializeScene(deck, assets) {
+  const activeScene = activeSceneFromDeck(deck);
+  return {
+    ...normalizeSceneContent(activeScene.state),
+    assets: normalizeAssets(assets),
+    sceneDeck: deck,
+    updatedAt: Date.now()
+  };
+}
+
+function emptyScene() {
+  const deck = emptySceneDeck();
+  return materializeScene(deck, emptyAssets());
+}
+
+function syncActiveSceneToDeck(state) {
+  const deck = normalizeSceneDeck(state.sceneDeck, normalizeSceneContent(state));
+  const activeScene = activeSceneFromDeck(deck);
+  activeScene.state = normalizeSceneContent(state, activeScene.state);
+  state.sceneDeck = deck;
+  state.updatedAt = Date.now();
+  return state;
+}
+
+function activateScene(state, sceneId) {
+  syncActiveSceneToDeck(state);
+  if (!state.sceneDeck.scenes.some(scene => scene.id === sceneId)) return state;
+  state.sceneDeck.activeSceneId = sceneId;
+  return materializeScene(state.sceneDeck, state.assets);
+}
+
+function normalizeScene(incoming, fallback = emptyScene()) {
+  const value = incoming && typeof incoming === 'object' ? incoming : {};
+  const fallbackState = fallback && typeof fallback === 'object' ? fallback : emptyScene();
+  const legacyContent = normalizeSceneContent(value, normalizeSceneContent(fallbackState));
+  const deck = normalizeSceneDeck(value.sceneDeck, legacyContent);
+  return materializeScene(deck, normalizeAssets(value.assets, fallbackState.assets));
+}
+
+// El cliente sólo puede actualizar la composición activa: las otras escenas se
+// conservan en el servidor para que un snapshot viejo no pueda sobrescribirlas.
+function applyActiveSceneSnapshot(incoming, fallback) {
+  const state = normalizeScene(fallback);
+  const content = normalizeSceneContent(incoming, normalizeSceneContent(state));
+  Object.assign(state, content);
+  state.assets = normalizeAssets(incoming && incoming.assets, state.assets);
+  return syncActiveSceneToDeck(state);
 }
 
 const projectStateCache = new Map();
@@ -355,6 +455,7 @@ async function loadProjectScene(projectId) {
 async function saveProjectScene(projectId, actorTwitchId) {
   const state = projectStateCache.get(projectId);
   if (!state) return;
+  syncActiveSceneToDeck(state);
   const result = await supabaseAdmin.from('project_scenes').update({
     state: normalizeScene(state),
     updated_by_twitch_id: actorTwitchId || null
@@ -604,7 +705,7 @@ app.post('/state', requireEditorApi, async (req, res) => {
   try {
     const projectId = req.projectAccess.projectId;
     const fallback = await loadProjectScene(projectId);
-    const state = normalizeScene(req.body, fallback);
+    const state = applyActiveSceneSnapshot(req.body, fallback);
     projectStateCache.set(projectId, state);
     await saveProjectScene(projectId, req.session.user.id);
     broadcastWS({ type: 'snapshot', state }, null, projectId);
@@ -1016,6 +1117,15 @@ wss.on('connection', (ws, req) => {
     STATE = projectStateCache.get(ws.projectId) || ws.state;
 
     switch (data.type) {
+      case 'scene:activate': {
+        const sceneId = data.payload && String(data.payload.sceneId || '');
+        if (!STATE.sceneDeck || !STATE.sceneDeck.scenes.some(scene => scene.id === sceneId)) break;
+        STATE = activateScene(STATE, sceneId);
+        broadcastWS({ type: 'snapshot', state: STATE }, null);
+        recordAudit(ws.projectId, ws.twitchId, 'scene.activated', 'scene', sceneId).catch(() => {});
+        break;
+      }
+
       // stroke events
       case 'stroke:start':
         if (data.payload) {
@@ -1085,9 +1195,14 @@ wss.on('connection', (ws, req) => {
         break;
       case 'asset:image:delete':
         if (data.payload && data.payload.id) {
+          syncActiveSceneToDeck(STATE);
           STATE.assets.images = STATE.assets.images.filter(x => x.id !== data.payload.id);
-          // also remove from canvas if present
-          STATE.images = STATE.images.filter(x => x.url !== data.payload.url);
+          // La biblioteca es común a las tres escenas: al borrar un archivo,
+          // se lo retira de cada composición para que no reaparezca al cambiar.
+          STATE.sceneDeck.scenes.forEach(scene => {
+            scene.state.images = (scene.state.images || []).filter(x => x.url !== data.payload.url);
+          });
+          STATE = materializeScene(STATE.sceneDeck, STATE.assets);
           STATE.updatedAt = Date.now();
         }
         // El Viewer no usa la biblioteca: necesita el estado completo para retirar
@@ -1103,12 +1218,18 @@ wss.on('connection', (ws, req) => {
         break;
       case 'asset:audio:delete':
         if (data.payload && data.payload.id) {
+          syncActiveSceneToDeck(STATE);
           STATE.assets.audio = STATE.assets.audio.filter(x => x.id !== data.payload.id);
-          STATE.audio.playlist = STATE.audio.playlist.filter(x => x.id !== data.payload.id);
-          Object.keys(STATE.audio.slots || {}).forEach(slot => {
-            if (STATE.audio.slots[slot] && STATE.audio.slots[slot].id === data.payload.id) delete STATE.audio.slots[slot];
+          STATE.sceneDeck.scenes.forEach(scene => {
+            const audio = scene.state.audio || { current: null, playlist: [], slots: {} };
+            audio.playlist = (audio.playlist || []).filter(x => x.id !== data.payload.id);
+            Object.keys(audio.slots || {}).forEach(slot => {
+              if (audio.slots[slot] && audio.slots[slot].id === data.payload.id) delete audio.slots[slot];
+            });
+            if (audio.current && audio.current.url === data.payload.url) audio.current = null;
+            scene.state.audio = audio;
           });
-          if (STATE.audio.current && STATE.audio.current.url === data.payload.url) STATE.audio.current = null;
+          STATE = materializeScene(STATE.sceneDeck, STATE.assets);
           STATE.updatedAt = Date.now();
         }
         broadcastWS({ type: 'snapshot', state: STATE }, null);
@@ -1189,7 +1310,7 @@ wss.on('connection', (ws, req) => {
       // snapshot (full)
       case 'snapshot':
         if (data.payload && typeof data.payload === 'object') {
-          Object.assign(STATE, data.payload, { updatedAt: Date.now() });
+          STATE = applyActiveSceneSnapshot(data.payload, STATE);
         }
         broadcastWS({ type: 'snapshot', state: STATE }, null);
         break;
@@ -1197,6 +1318,7 @@ wss.on('connection', (ws, req) => {
       default:
         broadcastWS(data, null);
     }
+    syncActiveSceneToDeck(STATE);
     projectStateCache.set(ws.projectId, STATE);
     // Todos los sockets del mismo proyecto comparten la misma referencia en
     // memoria: el próximo cambio siempre parte del estado más reciente.

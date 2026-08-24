@@ -22,6 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (msg.type === 'room:connected' && msg.payload) {
           updateRealtimeStatus(`En tiempo real · Sala ${msg.payload.roomCode || 'privada'}`);
         } else if (msg.type === 'snapshot' && msg.state) {
+          if (msg.state.sceneDeck) STATE.sceneDeck = msg.state.sceneDeck;
           if (msg.state.assets) {
             STATE.assets = { images: [], audio: [], ...msg.state.assets };
             updateImagesLibraryUI();
@@ -44,7 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           updateCanvasImagesUI();
           updateSoundboardUI();
-          updateTextList(); updateTimerList();
+          updateTextList(); updateTimerList(); updateSceneList();
           redraw();
         } else if (msg.type === 'project:settings' && msg.payload && PROJECT_INFO) {
           renderProjectInfo({ ...PROJECT_INFO, project: { ...PROJECT_INFO.project, ...msg.payload } });
@@ -163,6 +164,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const timerMode = document.getElementById('timerMode'); const timerSeconds = document.getElementById('timerSeconds');
     const timerColor = document.getElementById('timerColor'); const timerFontSize = document.getElementById('timerFontSize'); const timerFont = document.getElementById('timerFont');
     const timerX = document.getElementById('timerX'); const timerY = document.getElementById('timerY'); const btnAddTimer = document.getElementById('btn-add-timer'); const timerList = document.getElementById('timerList');
+    const sceneList = document.getElementById('sceneList');
 
     const tabButtons = document.querySelectorAll('.tab-btn');
     const tabPanels = document.querySelectorAll('.tab-panel');
@@ -178,7 +180,8 @@ document.addEventListener('DOMContentLoaded', () => {
       audio: { current: null, playlist: [], slots: {} },
       assets: { images: [], audio: [] },
       viewport: { x: 0, y: 0, width: 1920, height: 1080, scale: 1 },
-      volume: 1.0
+      volume: 1.0,
+      sceneDeck: { activeSceneId: 'scene-1', scenes: [] }
     };
     let PROJECT_INFO = null;
     let latestViewerUrl = null;
@@ -439,6 +442,37 @@ document.addEventListener('DOMContentLoaded', () => {
       try { socket.send(JSON.stringify({ type: 'snapshot', payload: STATE })); } catch (e) {}
       return fetch('/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(STATE) })
         .catch(err => console.warn('No se pudo guardar el estado', err));
+    }
+
+    function sceneSummary(scene) {
+      const content = scene && scene.state ? scene.state : {};
+      const items = (content.images || []).length + (content.texts || []).length + (content.timers || []).length;
+      const strokes = (content.strokes || []).length;
+      if (!items && !strokes) return 'Vacía';
+      const parts = [];
+      if (items) parts.push(`${items} elemento${items === 1 ? '' : 's'}`);
+      if (strokes) parts.push(`${strokes} trazo${strokes === 1 ? '' : 's'}`);
+      return parts.join(' · ');
+    }
+
+    function updateSceneList() {
+      if (!sceneList) return;
+      const deck = STATE.sceneDeck || {};
+      const scenes = Array.isArray(deck.scenes) ? deck.scenes : [];
+      sceneList.innerHTML = '';
+      scenes.forEach((scene, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `scene-card${scene.id === deck.activeSceneId ? ' active' : ''}`;
+        button.setAttribute('aria-pressed', String(scene.id === deck.activeSceneId));
+        button.innerHTML = `<span class="scene-number">${index + 1}</span><span class="scene-copy"><strong>${scene.name || `Escena ${index + 1}`}</strong><small>${sceneSummary(scene)}</small></span><span class="scene-status">${scene.id === deck.activeSceneId ? 'En vivo' : 'Cambiar'}</span>`;
+        button.addEventListener('click', () => {
+          if (scene.id === deck.activeSceneId) return;
+          if (socket.readyState !== WebSocket.OPEN) { alert('No hay conexión en tiempo real. Volvé a intentarlo en un momento.'); return; }
+          socket.send(JSON.stringify({ type: 'scene:activate', payload: { sceneId: scene.id } }));
+        });
+        sceneList.appendChild(button);
+      });
     }
 
     // tabs
@@ -1272,7 +1306,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // initial
-    updateImagesLibraryUI(); updateAudioLibraryUI(); updateCanvasImagesUI(); updateTextList(); updateTimerList(); updateSoundboardUI(); fitCanvas(); loadProjectInfo();
+    updateImagesLibraryUI(); updateAudioLibraryUI(); updateCanvasImagesUI(); updateTextList(); updateTimerList(); updateSceneList(); updateSoundboardUI(); fitCanvas(); loadProjectInfo();
     console.log('Editor inicializado correctamente.');
 
   } catch (err) {

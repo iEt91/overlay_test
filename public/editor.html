@@ -36,6 +36,7 @@
         <button class="tab-btn" data-tab="images" title="Imágenes y GIFs"><span class="tool-icon">▧</span><span>Imágenes / GIFs</span></button>
         <button class="tab-btn" data-tab="audio" title="Audio"><span class="tool-icon">♬</span><span>Audio</span></button>
         <button class="tab-btn" data-tab="paragraphs" title="Texto y cronómetros"><span class="tool-icon">T</span><span>Texto y cronómetros</span></button>
+        <button class="tab-btn" data-tab="scenes" title="Escenas"><span class="tool-icon">▤</span><span>Escenas</span></button>
         <button class="tab-btn" data-tab="control" title="Configuración y control"><span class="tool-icon">⚙</span><span>Configuración y control</span></button>
       </nav>
 
@@ -90,6 +91,13 @@
             <button id="btn-add-timer" type="button">Añadir cronómetro oculto</button>
             <div id="timerList" class="canvas-objects"></div>
           </section>
+        </div>
+
+        <div class="panel tab-panel" id="panel-scenes" data-tab="scenes" style="display:none">
+          <div class="panel-title"><span class="eyebrow">COMPOSICIÓN</span><h2>Escenas</h2></div>
+          <p class="small">Cada escena guarda por separado sus imágenes, trazos, textos, cronómetros y soundboard. Al cambiarla, se actualizan todos los editores y el Viewer.</p>
+          <div id="sceneList" class="scene-list" aria-label="Escenas del proyecto"></div>
+          <p class="small scene-limit-note">Tu proyecto incluye 3 escenas. Próximamente habrá más con un plan superior.</p>
         </div>
 
         <div class="panel tab-panel" id="panel-control" data-tab="control" style="display:none">
