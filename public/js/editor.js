@@ -1202,14 +1202,18 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateImagesLibraryUI() {
       imagesList.innerHTML = '';
       STATE.assets.images.forEach(a => {
-        const el = document.createElement('div'); el.className='lib-item'; el.style.padding='6px'; el.style.borderBottom='1px solid rgba(255,255,255,0.03)';
-        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;">
-          <div style="flex:1;overflow:hidden"><small>${a.name}</small></div>
-          <button data-id="${a.id}" class="btn-add">+</button>
-          <button data-id="${a.id}" class="btn-delete">✖</button>
-        </div>`;
+        const el = document.createElement('div'); el.className = 'lib-item';
+        const main = document.createElement('div'); main.className = 'library-item-main';
+        const name = document.createElement('small'); name.className = 'library-item-name'; name.textContent = a.name; name.title = a.name;
+        const actions = document.createElement('div'); actions.className = 'library-actions';
+        const remove = createLibraryButton('btn-delete asset-delete', 'Eliminar de la biblioteca', trashIconMarkup());
+        const add = createLibraryButton('btn-add', 'Agregar al canvas', '+');
+        // La papelera quita el archivo de la biblioteca; el + queda a la
+        // derecha para que sea la acción final y más habitual.
+        actions.append(remove, add);
+        main.append(name, actions); el.append(main);
         imagesList.appendChild(el);
-        el.querySelector('.btn-add').addEventListener('click', () => {
+        add.addEventListener('click', () => {
           // add outside safe zone (to the right)
           const imgObj = { id: generateId(), url: a.url, x: 80, y: 80, width: 300, height: 200, rotation: 0, flipX: false, viewerVisible: false };
           STATE.images.push(imgObj);
@@ -1219,7 +1223,7 @@ document.addEventListener('DOMContentLoaded', () => {
           updateCanvasImagesUI();
           redraw();
         });
-        el.querySelector('.btn-delete').addEventListener('click', () => {
+        remove.addEventListener('click', () => {
           try { socket.send(JSON.stringify({ type:'asset:image:delete', payload: a })); } catch(e){}
           STATE.assets.images = STATE.assets.images.filter(x=>x.id!==a.id);
           STATE.images = STATE.images.filter(x=>x.url!==a.url);
@@ -1235,15 +1239,55 @@ document.addEventListener('DOMContentLoaded', () => {
           .filter(([, assigned]) => assigned && (assigned.id === a.id || assigned.url === a.url))
           .map(([slot]) => slot);
         const slotLabel = slots.length ? `Slot${slots.length > 1 ? 's' : ''}: ${slots.join(', ')}` : 'Sin asignar';
-        const el = document.createElement('div'); el.className='lib-item'; el.style.padding='6px'; el.style.borderBottom='1px solid rgba(255,255,255,0.03)';
+        const el = document.createElement('div'); el.className = 'lib-item audio-library-item';
         el.draggable = true;
-        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;">
-          <div style="flex:1;overflow:hidden"><small>${a.name}</small></div>
-          <small class="audio-slot-label">${slotLabel}</small>
-        </div>`;
+        const main = document.createElement('div'); main.className = 'library-item-main';
+        const details = document.createElement('div'); details.className = 'library-item-details';
+        const name = document.createElement('small'); name.className = 'library-item-name'; name.textContent = a.name; name.title = a.name;
+        const label = document.createElement('small'); label.className = 'audio-slot-label'; label.textContent = slotLabel; label.title = slotLabel;
+        const actions = document.createElement('div'); actions.className = 'library-actions';
+        const assign = createLibraryButton('slot-assign', 'Asignar a un slot', slotIconMarkup());
+        const remove = createLibraryButton('btn-delete asset-delete', 'Eliminar audio de esta escena', trashIconMarkup());
+        const slotMenu = document.createElement('div'); slotMenu.className = 'slot-menu'; slotMenu.hidden = true;
+        for (let slot = 0; slot <= 9; slot++) {
+          const slotButton = document.createElement('button');
+          slotButton.type = 'button'; slotButton.textContent = String(slot); slotButton.title = `Asignar a slot ${slot}`;
+          slotButton.addEventListener('click', event => {
+            event.stopPropagation();
+            STATE.audio.slots[String(slot)] = a;
+            slotMenu.hidden = true;
+            publishSnapshot(); updateSoundboardUI(); updateAudioLibraryUI();
+          });
+          slotMenu.appendChild(slotButton);
+        }
+        assign.addEventListener('click', event => {
+          event.stopPropagation();
+          audioList.querySelectorAll('.slot-menu').forEach(menu => { if (menu !== slotMenu) menu.hidden = true; });
+          slotMenu.hidden = !slotMenu.hidden;
+        });
+        remove.addEventListener('click', () => {
+          const wasPlaying = STATE.audio.current && STATE.audio.current.url === a.url;
+          if (wasPlaying) stopAllLocalAudio();
+          STATE.assets.audio = STATE.assets.audio.filter(item => item.id !== a.id);
+          STATE.audio.playlist = (STATE.audio.playlist || []).filter(item => item.id !== a.id);
+          Object.keys(STATE.audio.slots || {}).forEach(slot => {
+            if (STATE.audio.slots[slot] && STATE.audio.slots[slot].id === a.id) delete STATE.audio.slots[slot];
+          });
+          if (wasPlaying) STATE.audio.current = null;
+          try { socket.send(JSON.stringify({ type: 'asset:audio:delete', payload: a })); } catch (e) {}
+          updateAudioLibraryUI(); updateSoundboardUI();
+        });
+        details.append(name, label); actions.append(assign, remove); main.append(details, actions); el.append(main, slotMenu);
         audioList.appendChild(el);
         el.addEventListener('dragstart', event => { event.dataTransfer.setData('text/plain', a.id); event.dataTransfer.effectAllowed = 'copy'; });
       });
+    }
+
+    function createLibraryButton(className, title, content) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = className; button.title = title; button.setAttribute('aria-label', title);
+      button.innerHTML = content;
+      return button;
     }
 
     function visibilityIconMarkup(visible) {
@@ -1255,6 +1299,14 @@ document.addEventListener('DOMContentLoaded', () => {
       return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14M9 8l7 4-7 4V8ZM19 5v14" /></svg>';
     }
 
+    function trashIconMarkup() {
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" /></svg>';
+    }
+
+    function slotIconMarkup() {
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 10h8M12 7v6M9 15h6" /></svg>';
+    }
+
     function updateCanvasImagesUI() {
       if (!canvasImagesList) return;
       canvasImagesList.innerHTML = '';
@@ -1262,11 +1314,19 @@ document.addEventListener('DOMContentLoaded', () => {
       STATE.images.forEach(img => {
         const row = document.createElement('div'); row.className = 'canvas-object';
         const visible = img.viewerVisible !== false;
-        row.innerHTML = `<span class="object-name">${imageName(img)}</span><button class="select">Seleccionar</button><button class="toggle eye-toggle" title="${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}" aria-label="${visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer'}">${visibilityIconMarkup(visible)}</button><button class="flip mirror-toggle" title="Voltear horizontalmente" aria-label="Voltear horizontalmente">${mirrorIconMarkup()}</button><button class="remove">✖</button>`;
-        row.querySelector('.select').addEventListener('click', () => { selectedImageId = img.id; setTool('select'); redraw(); });
-        row.querySelector('.toggle').addEventListener('click', () => { img.viewerVisible = !visible; queueImageUpdate(img, true); updateCanvasImagesUI(); redraw(); });
-        row.querySelector('.flip').addEventListener('click', () => { img.flipX = !img.flipX; queueImageUpdate(img, true); redraw(); });
-        row.querySelector('.remove').addEventListener('click', () => { STATE.images = STATE.images.filter(item => item.id !== img.id); if (selectedImageId === img.id) selectedImageId = null; try { socket.send(JSON.stringify({ type: 'image:remove', payload: { id: img.id } })); } catch(e) {} updateCanvasImagesUI(); redraw(); });
+        const name = document.createElement('span'); name.className = 'object-name'; name.textContent = imageName(img); name.title = imageName(img);
+        const select = createLibraryButton('select', 'Seleccionar imagen', 'Seleccionar');
+        const actions = document.createElement('div'); actions.className = 'canvas-actions';
+        const flip = createLibraryButton('flip mirror-toggle', 'Voltear horizontalmente', mirrorIconMarkup());
+        const remove = createLibraryButton('remove canvas-remove', 'Quitar del canvas', trashIconMarkup());
+        const toggle = createLibraryButton('toggle eye-toggle', visible ? 'Ocultar en Viewer' : 'Mostrar en Viewer', visibilityIconMarkup(visible));
+        // Orden deliberado: espejo, quitar del canvas y visibilidad. Quitar
+        // sólo afecta a la composición actual; el archivo queda en biblioteca.
+        actions.append(flip, remove, toggle); row.append(name, select, actions);
+        select.addEventListener('click', () => { selectedImageId = img.id; setTool('select'); redraw(); });
+        toggle.addEventListener('click', () => { img.viewerVisible = !visible; queueImageUpdate(img, true); updateCanvasImagesUI(); redraw(); });
+        flip.addEventListener('click', () => { img.flipX = !img.flipX; queueImageUpdate(img, true); redraw(); });
+        remove.addEventListener('click', () => { STATE.images = STATE.images.filter(item => item.id !== img.id); if (selectedImageId === img.id) selectedImageId = null; try { socket.send(JSON.stringify({ type: 'image:remove', payload: { id: img.id } })); } catch(e) {} updateCanvasImagesUI(); redraw(); });
         canvasImagesList.appendChild(row);
       });
     }
