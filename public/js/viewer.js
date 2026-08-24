@@ -12,10 +12,6 @@ const canvas = document.getElementById('viewerCanvas');
 const ctx = canvas && canvas.getContext ? canvas.getContext('2d', { alpha: true }) : null;
 const imageLayer = document.getElementById('viewerImageLayer');
 
-// Panel para desbloquear audio si el navegador/OBS lo exige
-const audioUnlock = document.getElementById('audioUnlock');
-const btnEnableAudio = document.getElementById('btnEnableAudio');
-
 // ----------------------------- Estado mundial -----------------------------
 const imageCache = new Map();
 const domImageMap = new Map();
@@ -30,118 +26,125 @@ let WORLD = {
   volume: 1.0
 };
 
-// ----------------------------- Audio (estable) -----------------------------
-// Subsistema robusto para CEF/OBS: 1 solo AudioContext, 1 solo HTMLAudioElement,
-// espera canplaythrough, offset inicial 1 sola vez, y fades cortos.
+// ----------------------------- Audio (Viewer / OBS) -----------------------------
+// El Viewer usa audio HTML nativo. Evitamos Web Audio / AudioContext porque en el
+// navegador embebido de OBS puede quedar suspendido aunque el Editor sí reproduzca.
 const AudioState = {
-  ctx: null,
-  gain: null,
-  el: null,              // HTMLAudioElement compartido
-  srcNode: null,         // MediaElementAudioSourceNode
+  el: null,
   currentUrl: null,
   playing: false,
   masterVolume: 1.0,
   fadeMs: 120,
   lastStartAtServer: null,
+  finishedUrl: null,
+  finishedStartAtServer: null,
+  requestId: 0,
 };
 
-function ensureAudioGraph() {
-  if (AudioState.ctx) return;
-  AudioState.ctx = new (window.AudioContext || window.webkitAudioContext)();
-  AudioState.gain = AudioState.ctx.createGain();
-  AudioState.gain.gain.value = AudioState.masterVolume;
-  AudioState.gain.connect(AudioState.ctx.destination);
-
-  const el = new Audio();
+function ensureAudioElement() {
+  if (AudioState.el) return AudioState.el;
+  const el = document.createElement('audio');
   el.preload = "auto";
-  el.crossOrigin = "anonymous";
   el.loop = false;
   el.autoplay = false;
   el.controls = false;
+  el.style.display = 'none';
+  el.volume = AudioState.masterVolume;
+  document.body.appendChild(el);
 
-  const src = AudioState.ctx.createMediaElementSource(el);
-  src.connect(AudioState.gain);
-
-  el.addEventListener("ended", () => { AudioState.playing = false; });
+  el.addEventListener("ended", () => {
+    AudioState.playing = false;
+    AudioState.finishedUrl = AudioState.currentUrl;
+    AudioState.finishedStartAtServer = AudioState.lastStartAtServer;
+  });
   el.addEventListener("error", (e) => {
     console.warn("[viewer] Audio error", e);
     AudioState.playing = false;
   });
 
   AudioState.el = el;
-  AudioState.srcNode = src;
+  return el;
 }
 
 function setMasterVolume(vol) {
   AudioState.masterVolume = Math.max(0, Math.min(1, vol ?? 1));
-  if (AudioState.gain && AudioState.ctx) {
-    const now = AudioState.ctx.currentTime;
-    AudioState.gain.gain.cancelScheduledValues(now);
-    AudioState.gain.gain.setValueAtTime(AudioState.gain.gain.value, now);
-    AudioState.gain.gain.linearRampToValueAtTime(AudioState.masterVolume, now + 0.05);
-  }
+  if (AudioState.el) AudioState.el.volume = AudioState.masterVolume;
 }
 
 async function fadeTo(target, ms) {
-  if (!AudioState.gain || !AudioState.ctx) return;
-  const now = AudioState.ctx.currentTime;
-  AudioState.gain.gain.cancelScheduledValues(now);
-  AudioState.gain.gain.setValueAtTime(AudioState.gain.gain.value, now);
-  AudioState.gain.gain.linearRampToValueAtTime(target, now + ms / 1000);
-  return new Promise(r => setTimeout(r, ms));
+  const el = AudioState.el;
+  if (!el) return;
+  if (!ms) { el.volume = target; return; }
+  const initial = el.volume;
+  const startedAt = performance.now();
+  await new Promise((resolve) => {
+    const step = (now) => {
+      const progress = Math.min(1, (now - startedAt) / ms);
+      el.volume = initial + (target - initial) * progress;
+      if (progress < 1) requestAnimationFrame(step);
+      else resolve();
+    };
+    requestAnimationFrame(step);
+  });
 }
 
-async function playAudioOnce({ url, startedAtServer }) {
-  ensureAudioGraph();
-
-  if (AudioState.ctx.state === "suspended") {
-    try { await AudioState.ctx.resume(); } catch {}
-  }
+async function playAudioOnce({ url, startedAtServer }, { force = true } = {}) {
+  if (!url) return;
+  const el = ensureAudioElement();
+  const startKey = startedAtServer || null;
+  const alreadyFinished = AudioState.finishedUrl === url
+    && AudioState.finishedStartAtServer === startKey;
+  if (!force && (AudioState.playing || alreadyFinished) && AudioState.currentUrl === url) return;
+  const requestId = ++AudioState.requestId;
 
   // Si ya suena algo, paramos antes de cambiar fuente
   if (AudioState.playing) {
-    await stopAudio(true);
+    await stopAudio(true, { invalidate: false });
   }
 
   // Cargamos nueva fuente
-  AudioState.el.src = url;
-  AudioState.el.currentTime = 0;
-  AudioState.el.load();
+  el.src = url;
+  el.currentTime = 0;
+  el.load();
   AudioState.currentUrl = url;
-  AudioState.lastStartAtServer = startedAtServer || null;
+  AudioState.lastStartAtServer = startKey;
+  AudioState.finishedUrl = null;
+  AudioState.finishedStartAtServer = null;
 
-  // Esperamos canplaythrough (o timeout suave) para evitar “petardeos”
+  // Esperamos carga suficiente (o timeout suave) antes de iniciar.
   await new Promise((resolve) => {
     const onReady = () => {
-      AudioState.el.removeEventListener("canplaythrough", onReady);
+      el.removeEventListener("canplay", onReady);
       clearTimeout(to);
       resolve();
     };
     const to = setTimeout(() => resolve(), 1200);
-    AudioState.el.addEventListener("canplaythrough", onReady, { once: true });
+    el.addEventListener("canplay", onReady, { once: true });
   });
+  if (requestId !== AudioState.requestId) return;
 
   // Offset inicial UNA sola vez
   if (AudioState.lastStartAtServer) {
     const nowServer = Date.now();
     const elapsed = Math.max(0, (nowServer - AudioState.lastStartAtServer) / 1000);
-    const dur = Number.isFinite(AudioState.el.duration) ? AudioState.el.duration : null;
+    const dur = Number.isFinite(el.duration) ? el.duration : null;
     const seekTo = dur ? Math.min(elapsed, Math.max(0, dur - 0.25)) : elapsed;
-    try { AudioState.el.currentTime = seekTo; } catch {}
+    try { el.currentTime = seekTo; } catch {}
   }
 
   try {
     await fadeTo(0.0, 0);
-    await AudioState.el.play();
+    await el.play();
     AudioState.playing = true;
     await fadeTo(AudioState.masterVolume, AudioState.fadeMs);
   } catch (e) {
-    console.warn("[viewer] play() blocked:", e);
-    showAudioUnlock(); // Permitirá reintentar tras click
+    console.warn("[viewer] No se pudo reproducir el audio:", e);
+    AudioState.playing = false;
   }
 }
 
-async function stopAudio(immediate = false) {
+async function stopAudio(immediate = false, { invalidate = true } = {}) {
+  if (invalidate) AudioState.requestId += 1;
   if (!AudioState.el) return;
   try {
     if (!immediate) await fadeTo(0.0, AudioState.fadeMs);
@@ -154,29 +157,14 @@ async function stopAudio(immediate = false) {
 }
 
 // API que usa el WS:
-function handleAudioTrigger(payload) { // { url, startedAtServer? }
-  playAudioOnce(payload);
+function handleAudioTrigger(payload, options) { // { url, startedAtServer? }
+  playAudioOnce(payload, options);
 }
 function handleAudioStop() {
   stopAudio(false);
 }
 function handleVolumeUpdate({ volume }) {
   setMasterVolume(typeof volume === 'number' ? volume : AudioState.masterVolume);
-}
-
-// UI para desbloquear audio (OBS/Chrome autoplay)
-function showAudioUnlock() {
-  if (!audioUnlock) return;
-  audioUnlock.style.display = 'block';
-  if (btnEnableAudio) {
-    btnEnableAudio.onclick = async () => {
-      try { ensureAudioGraph(); await AudioState.ctx.resume(); } catch {}
-      try {
-        if (AudioState.el && AudioState.el.src) await AudioState.el.play();
-        audioUnlock.style.display = 'none';
-      } catch (e) { console.warn("manual play failed", e); }
-    };
-  }
 }
 
 // ----------------------------- WebSocket -----------------------------
@@ -197,6 +185,12 @@ function handleMessage(msg) {
         WORLD = Object.assign({}, WORLD, msg.state);
         if (typeof WORLD.volume !== 'number') WORLD.volume = 1.0;
         setMasterVolume(WORLD.volume);
+        const snapshotAudio = WORLD.audio && WORLD.audio.current;
+        if (snapshotAudio && !snapshotAudio.paused) {
+          handleAudioTrigger(snapshotAudio, { force: false });
+        } else if (!snapshotAudio && AudioState.playing) {
+          handleAudioStop();
+        }
         adjustCanvasToViewport();
         render(); // inmediato
       }
@@ -253,7 +247,7 @@ function handleMessage(msg) {
       break;
     case 'audio:resume':
       if (AudioState.el && AudioState.currentUrl) {
-        AudioState.el.play().then(() => { AudioState.playing = true; }).catch(showAudioUnlock);
+        AudioState.el.play().then(() => { AudioState.playing = true; }).catch((e) => console.warn('[viewer] No se pudo reanudar el audio:', e));
       } else if (msg.payload) {
         handleAudioTrigger(msg.payload);
       }
