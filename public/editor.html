@@ -15,9 +15,9 @@
     <header class="topbar">
       <div class="brand"><span class="brand-mark" aria-hidden="true">T</span><span class="brand-name">Telestrator</span></div>
       <div class="top-controls">
-        <section class="soundboard-top" aria-label="Soundboard"><span class="soundboard-label">Soundboard</span><div class="soundboard-actions"><button id="btn-sound-pause" type="button" title="Pausar o reanudar">Ⅱ</button><button id="btn-sound-stop" type="button" title="Detener">■</button></div><div id="soundboard" class="soundboard" aria-label="Soundboard de 0 a 9"></div><span class="soundboard-shortcut">Atajos: 0–9</span></section>
+        <section class="soundboard-top" aria-label="Soundboard"><span class="soundboard-label">Soundboard</span><div class="soundboard-actions"><button id="btn-sound-pause" type="button" title="Reproducir" aria-label="Reproducir"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg></button><button id="btn-sound-stop" type="button" title="Detener" aria-label="Detener"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"/></svg></button></div><div id="soundboard" class="soundboard" aria-label="Soundboard de 0 a 9"></div><span class="soundboard-shortcut">Atajos: 0–9</span></section>
         <span class="top-divider soundboard-divider" aria-hidden="true"></span>
-        <label class="master-volume"><span class="control-icon" aria-hidden="true">◖</span><span>Volumen general</span><input id="masterVolume" type="range" min="0" max="100" value="100" /></label>
+        <label class="master-volume"><span id="volumeIcon" class="control-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 10v4h4l5 4V6L8 10H4Z"/><path d="M16 9.5a4 4 0 0 1 0 5"/><path d="M18.8 6.8a8 8 0 0 1 0 10.4"/></svg></span><span>Volumen general</span><input id="masterVolume" type="range" min="0" max="100" value="100" /></label>
         <span class="top-divider" aria-hidden="true"></span>
         <button id="btn-undo" class="top-action" title="Deshacer (Ctrl+Z)"><span>↶</span> Deshacer <kbd>Ctrl+Z</kbd></button>
         <span class="top-divider" aria-hidden="true"></span>
@@ -107,7 +107,7 @@
             <label class="field-label" for="testChannelInput">Canal de prueba</label>
             <input id="testChannelInput" type="text" maxlength="25" autocomplete="off" spellcheck="false" placeholder="usuario_de_twitch">
             <div class="button-row"><button id="btn-use-test-channel" type="button">Ver canal de prueba</button><button id="btn-reset-test-channel" class="secondary-action" type="button">Restaurar</button></div>
-            <p class="small">Solo cambia tu fondo en esta pestaña. No modifica el canal, chat ni Viewer del proyecto.</p>
+            <p class="small">Solo cambia tu fondo y chat en esta pestaña. No modifica el canal ni el Viewer del proyecto.</p>
           </div>
           <label class="toggle-row owner-only"><span>Chat de Twitch en el Editor</span><input id="chatEnabled" type="checkbox"><i aria-hidden="true"></i></label>
           <div class="section-divider"></div><h3>Invitados</h3>

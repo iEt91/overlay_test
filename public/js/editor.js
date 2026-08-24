@@ -130,6 +130,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnSoundStop = document.getElementById('btn-sound-stop');
 
     const masterVolumeEl = document.getElementById('masterVolume');
+    const volumeIcon = document.getElementById('volumeIcon');
     const btnUndo = document.getElementById('btn-undo');
     const btnClean = document.getElementById('btn-clean');
     const streamPreview = document.getElementById('streamPreview');
@@ -183,6 +184,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let latestViewerUrl = null;
     let activityRefreshTimer = null;
     let testPreviewChannel = sessionStorage.getItem('tango.test-preview-channel') || '';
+    let chatDismissed = false;
 
     function updateRealtimeStatus(message, offline = false) {
       if (!realtimeStatus || !roomSummary) return;
@@ -296,13 +298,17 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       return response.status === 204 ? null : response.json();
     }
-    function setChatVisibility(enabled) {
+    function setChatVisibility(enabled, options = {}) {
       if (!twitchChatPanel) return;
-      const channel = PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.twitch_channel_login;
-      twitchChatPanel.hidden = !enabled || !channel;
-      if (enabled && channel && twitchChatFrame && !twitchChatFrame.src) {
+      const channel = currentPreviewChannel();
+      if (!enabled || !channel) { twitchChatPanel.hidden = true; return; }
+      if (twitchChatFrame && (options.refreshChannel || twitchChatFrame.dataset.channel !== channel)) {
         twitchChatFrame.src = `https://www.twitch.tv/embed/${encodeURIComponent(channel)}/chat?parent=${encodeURIComponent(location.hostname)}&darkpopout`;
+        twitchChatFrame.dataset.channel = channel;
       }
+      // Si alguien cerró el panel, una actualización del overlay (como el
+      // botón de pánico) no debe volver a abrirlo por sorpresa.
+      if (!chatDismissed || options.reveal) twitchChatPanel.hidden = false;
     }
     function setOverlayVisibility(enabled) {
       if (!btnOverlayVisibility) return;
@@ -853,6 +859,15 @@ document.addEventListener('DOMContentLoaded', () => {
     function playLocalAudioAsset(assetId, url) {
       stopLocalAudio(assetId);
       const a = new Audio(url); a.crossOrigin='anonymous'; a.volume = STATE.volume;
+      a.addEventListener('ended', () => {
+        if (audioPlayers.get(assetId) !== a) return;
+        audioPlayers.delete(assetId);
+        if (STATE.audio.current && `slot-${STATE.audio.current.slot}` === assetId) {
+          STATE.audio.current = null;
+          try { socket.send(JSON.stringify({ type: 'audio:stop' })); } catch (e) {}
+          updateSoundboardUI();
+        }
+      });
       a.play().catch(e => console.warn('play err', e));
       audioPlayers.set(assetId, a);
     }
@@ -968,12 +983,14 @@ document.addEventListener('DOMContentLoaded', () => {
       sessionStorage.setItem('tango.test-preview-channel', channel);
       if (testChannelInput) testChannelInput.value = channel;
       showStreamPreview();
+      setChatVisibility(Boolean(PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.chat_enabled), { refreshChannel: true });
     });
     btnResetTestChannel && btnResetTestChannel.addEventListener('click', () => {
       testPreviewChannel = '';
       sessionStorage.removeItem('tango.test-preview-channel');
       if (testChannelInput) testChannelInput.value = '';
       showStreamPreview();
+      setChatVisibility(Boolean(PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.chat_enabled), { refreshChannel: true });
     });
     btnCopyViewer && btnCopyViewer.addEventListener('click', copyViewerUrl);
     btnOverlayVisibility && btnOverlayVisibility.addEventListener('click', async () => {
@@ -987,10 +1004,11 @@ document.addEventListener('DOMContentLoaded', () => {
     chatEnabled && chatEnabled.addEventListener('change', async () => {
       try {
         const result = await apiRequest('/api/project/settings', { method: 'PATCH', body: JSON.stringify({ chatEnabled: chatEnabled.checked }) });
+        if (chatEnabled.checked) chatDismissed = false;
         renderProjectInfo({ ...PROJECT_INFO, project: { ...PROJECT_INFO.project, ...result.project } });
       } catch (error) { chatEnabled.checked = !chatEnabled.checked; alert(error.message); }
     });
-    btnCloseChat && btnCloseChat.addEventListener('click', () => { if (twitchChatPanel) twitchChatPanel.hidden = true; });
+    btnCloseChat && btnCloseChat.addEventListener('click', () => { chatDismissed = true; if (twitchChatPanel) twitchChatPanel.hidden = true; });
     btnCreateInvite && btnCreateInvite.addEventListener('click', async () => {
       try {
         const result = await apiRequest('/api/project/invites', { method: 'POST' });
@@ -1238,7 +1256,19 @@ document.addEventListener('DOMContentLoaded', () => {
         soundboard.appendChild(button);
       }
       const playing = STATE.audio.current && !STATE.audio.current.paused;
-      if (btnSoundPause) btnSoundPause.textContent = playing ? 'Ⅱ' : '▶';
+      if (btnSoundPause) {
+        btnSoundPause.innerHTML = playing
+          ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="6" width="3.5" height="12" rx=".8"/><rect x="13.5" y="6" width="3.5" height="12" rx=".8"/></svg>'
+          : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg>';
+        btnSoundPause.title = playing ? 'Pausar' : 'Reproducir';
+        btnSoundPause.setAttribute('aria-label', btnSoundPause.title);
+      }
+      if (volumeIcon) {
+        const muted = STATE.volume <= 0;
+        volumeIcon.innerHTML = muted
+          ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6L8 10H4Z"/><path d="m17 10 4 4m0-4-4 4"/></svg>'
+          : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6L8 10H4Z"/><path d="M16 9.5a4 4 0 0 1 0 5"/><path d="M18.8 6.8a8 8 0 0 1 0 10.4"/></svg>';
+      }
     }
 
     // initial
