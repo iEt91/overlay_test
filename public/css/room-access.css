@@ -1,0 +1,15 @@
+.access-link-button {
+  justify-self: start;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.access-link-button:hover {
+  text-decoration: underline;
+}

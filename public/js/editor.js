@@ -11,6 +11,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     socket.addEventListener('close', (event) => {
+      if (event && event.code === 4004) {
+        alert('El streamer restableció la contraseña de la sala. Ingresá de nuevo con la nueva contraseña.');
+        location.assign('/room/access');
+        return;
+      }
       const code = event && event.code ? ` (código ${event.code})` : '';
       updateRealtimeStatus(`Sin conexión en tiempo real${code}`, true);
     });
@@ -149,6 +154,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnResetTestChannel = document.getElementById('btn-reset-test-channel');
     const viewerUrlStatus = document.getElementById('viewerUrlStatus');
     const btnCopyViewer = document.getElementById('btn-copy-viewer');
+    const btnResetRoomPassword = document.getElementById('btn-reset-room-password');
     const btnOverlayVisibility = document.getElementById('btn-overlay-visibility');
     const chatEnabled = document.getElementById('chatEnabled');
     const twitchChatPanel = document.getElementById('twitchChatPanel');
@@ -419,6 +425,7 @@ document.addEventListener('DOMContentLoaded', () => {
       'member.whitelist_added': 'autorizó a un moderador',
       'member.whitelist_removed': 'quitó a un moderador autorizado',
       'room.password_set': 'protegió la sala con contraseña',
+      'room.password_reset': 'restableció la contraseña de la sala',
       'member.removed': 'quitó a un invitado',
       'overlay.panic_enabled': 'ocultó todo el overlay',
       'overlay.restored': 'restauró el overlay',
@@ -1101,6 +1108,9 @@ document.addEventListener('DOMContentLoaded', () => {
       setChatVisibility(Boolean(PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.chat_enabled), { refreshChannel: true });
     });
     btnCopyViewer && btnCopyViewer.addEventListener('click', copyViewerUrl);
+    btnResetRoomPassword && btnResetRoomPassword.addEventListener('click', () => {
+      location.assign('/room/access?reset=1');
+    });
     btnOverlayVisibility && btnOverlayVisibility.addEventListener('click', async () => {
       if (!PROJECT_INFO) return;
       const visible = !PROJECT_INFO || PROJECT_INFO.project.overlay_enabled !== false;

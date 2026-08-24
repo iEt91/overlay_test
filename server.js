@@ -396,6 +396,17 @@ async function getProjectRoomSecurity(projectId) {
   return databaseError(result, 'No se pudo validar la seguridad de la sala.');
 }
 
+async function setProjectRoomPassword(projectId, password) {
+  const roomPasswordHash = await hashRoomPassword(password);
+  const updatedAt = new Date().toISOString();
+  const result = await supabaseAdmin.from('projects').update({
+    room_password_hash: roomPasswordHash,
+    room_password_updated_at: updatedAt,
+    updated_at: updatedAt
+  }).eq('id', projectId).select('id, room_password_updated_at').single();
+  return databaseError(result, 'No se pudo proteger la sala.');
+}
+
 function hasVerifiedRoomAccess(sessionData, project) {
   const access = sessionData && sessionData.roomAccess;
   if (!access || access.projectId !== project.id || !project.room_password_hash) return false;
@@ -837,6 +848,7 @@ app.get('/api/room/access', async (req, res) => {
       isOwner,
       pendingInvitation: Boolean(access.pendingInvite),
       needsPasswordSetup: !access.project.room_password_hash,
+      canResetPassword: Boolean(isOwner && access.project.room_password_hash),
       passwordVerified: hasVerifiedRoomAccess(req.session, access.project)
     });
   } catch (error) {
@@ -859,14 +871,7 @@ app.post('/api/room/password', async (req, res) => {
     const confirmation = req.body && req.body.confirmation;
     if (!password) return res.status(400).json({ error: `La contraseña debe tener entre ${ROOM_PASSWORD_MIN_LENGTH} y ${ROOM_PASSWORD_MAX_LENGTH} caracteres.` });
     if (password !== confirmation) return res.status(400).json({ error: 'Las contraseñas no coinciden.' });
-    const roomPasswordHash = await hashRoomPassword(password);
-    const updatedAt = new Date().toISOString();
-    const result = await supabaseAdmin.from('projects').update({
-      room_password_hash: roomPasswordHash,
-      room_password_updated_at: updatedAt,
-      updated_at: updatedAt
-    }).eq('id', access.project.id).select('id, room_password_updated_at').single();
-    const securedProject = databaseError(result, 'No se pudo proteger la sala.');
+    const securedProject = await setProjectRoomPassword(access.project.id, password);
     req.session.roomAccess = { projectId: access.project.id, passwordUpdatedAt: securedProject.room_password_updated_at || null };
     req.session.projectRole = 'owner';
     await saveSession(req);
@@ -875,6 +880,46 @@ app.post('/api/room/password', async (req, res) => {
   } catch (error) {
     console.error('Room password setup error:', error.message);
     res.status(500).json({ error: 'No se pudo crear la contraseña de la sala.' });
+  }
+});
+
+// La contraseña nunca se recupera ni se envía: está guardada como hash scrypt.
+// El propietario, identificado mediante OAuth de Twitch, puede reemplazarla
+// incluso si no recuerda la anterior. Cambiar room_password_updated_at invalida
+// automáticamente todas las verificaciones de contraseña previas.
+app.post('/api/room/password/reset', async (req, res) => {
+  try {
+    const access = await getRoomAccessCandidate(req);
+    if (!access || !access.membership || access.membership.role !== 'owner') {
+      return res.status(403).json({ error: 'Solo el streamer propietario puede restablecer la contraseña.' });
+    }
+    if (!access.project.room_password_hash) {
+      return res.status(409).json({ error: 'La sala todavía no tiene una contraseña configurada.' });
+    }
+    const password = normalizeRoomPassword(req.body && req.body.password);
+    const confirmation = req.body && req.body.confirmation;
+    if (!password) return res.status(400).json({ error: `La contraseña debe tener entre ${ROOM_PASSWORD_MIN_LENGTH} y ${ROOM_PASSWORD_MAX_LENGTH} caracteres.` });
+    if (password !== confirmation) return res.status(400).json({ error: 'Las contraseñas no coinciden.' });
+
+    const securedProject = await setProjectRoomPassword(access.project.id, password);
+    req.session.roomAccess = { projectId: access.project.id, passwordUpdatedAt: securedProject.room_password_updated_at || null };
+    req.session.projectRole = 'owner';
+    req.session.pendingInviteToken = null;
+    await saveSession(req);
+
+    // Los moderadores deben volver a desbloquear la sala con la nueva clave.
+    // Cerramos sus sockets activos inmediatamente para no dejar una sesión vieja
+    // editando mientras el cambio se propaga por Supabase.
+    wss.clients.forEach(client => {
+      if (client.role === 'editor' && client.projectId === access.project.id && client.twitchId !== req.session.user.id) {
+        client.close(4004, 'La contraseña de la sala fue restablecida');
+      }
+    });
+    await recordAudit(access.project.id, req.session.user.id, 'room.password_reset');
+    res.json({ redirect: '/editor.html' });
+  } catch (error) {
+    console.error('Room password reset error:', error.message);
+    res.status(500).json({ error: 'No se pudo restablecer la contraseña de la sala.' });
   }
 });
 
