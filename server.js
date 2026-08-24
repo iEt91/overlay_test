@@ -420,11 +420,16 @@ function databaseError(result, message) {
 }
 
 async function upsertTwitchUser(user) {
+  // El perfil recién recibido de Twitch usa snake_case, mientras que la
+  // sesión del navegador usa camelCase. Ambos recorridos deben poder
+  // actualizar la misma cuenta antes de validar una invitación.
+  const displayName = user.display_name || user.displayName || user.login;
+  const profileImageUrl = user.profile_image_url || user.profileImageUrl || null;
   const result = await supabaseAdmin.from('twitch_users').upsert({
     twitch_id: user.id,
     login: user.login,
-    display_name: user.display_name,
-    profile_image_url: user.profile_image_url || null
+    display_name: displayName,
+    profile_image_url: profileImageUrl
   }, { onConflict: 'twitch_id' });
   databaseError(result, 'No se pudo guardar la cuenta de Twitch.');
 }
