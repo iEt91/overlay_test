@@ -778,7 +778,13 @@ async function requireRoomAccessPage(req, res, next) {
     if (!access) return res.redirect('/auth/twitch');
     req.roomAccessCandidate = access;
     next();
-  } catch (_) {
+  } catch (error) {
+    // Mantiene el detalle técnico sólo en los registros del servidor. El
+    // navegador recibe un mensaje claro sin exponer información interna.
+    console.error('Room access page error:', error.message);
+    if (/invitación ya no es válida|invitación ya fue utilizada/i.test(error.message || '')) {
+      return res.status(403).send(error.message);
+    }
     res.status(503).send('No se pudo abrir la sala. Volvé a intentarlo.');
   }
 }
@@ -801,7 +807,11 @@ app.get('/api/room/access', async (req, res) => {
       needsPasswordSetup: !access.project.room_password_hash,
       passwordVerified: hasVerifiedRoomAccess(req.session, access.project)
     });
-  } catch (_) {
+  } catch (error) {
+    console.error('Room access API error:', error.message);
+    if (/invitación ya no es válida|invitación ya fue utilizada/i.test(error.message || '')) {
+      return res.status(403).json({ error: error.message });
+    }
     res.status(503).json({ error: 'No se pudo cargar la sala.' });
   }
 });
