@@ -131,6 +131,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnUploadImg = document.getElementById('btn-upload-img');
     const imagesList = document.getElementById('imagesList');
     const canvasImagesList = document.getElementById('canvasImagesList');
+    const sevenTvSearchForm = document.getElementById('sevenTvSearchForm');
+    const sevenTvSearch = document.getElementById('sevenTvSearch');
+    const btnSearchSevenTv = document.getElementById('btn-search-7tv');
+    const sevenTvStatus = document.getElementById('sevenTvStatus');
+    const sevenTvResults = document.getElementById('sevenTvResults');
     const audioFile = document.getElementById('audioFile');
     const btnUploadAudio = document.getElementById('btn-upload-audio');
     const audioList = document.getElementById('audioList');
@@ -269,6 +274,15 @@ document.addEventListener('DOMContentLoaded', () => {
     function screenToWorld(p) { return { x: p.x / transform.scale + transform.tx, y: p.y / transform.scale + transform.ty }; }
     function generateId() { return Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6).toString(36); }
     function isGifUrl(url) { return /\.gif(\?.*)?$/i.test(url); }
+    function imageName(image) {
+      if (image && typeof image.name === 'string' && image.name.trim()) return image.name;
+      try {
+        const pathname = new URL(image && image.url, location.origin).pathname;
+        return decodeURIComponent(pathname.split('/').pop() || 'Imagen');
+      } catch (_) {
+        return 'Imagen';
+      }
+    }
     function currentPreviewChannel() {
       return PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.twitch_channel_login;
     }
@@ -1195,6 +1209,83 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // LIB UI
+    function addEmoteToCanvas(emote) {
+      if (!emote || !emote.url) return;
+      const naturalWidth = Number(emote.width) || 256;
+      const naturalHeight = Number(emote.height) || 256;
+      const aspectRatio = Math.max(.2, Math.min(5, naturalWidth / naturalHeight));
+      const width = 220;
+      const height = Math.max(60, Math.min(360, Math.round(width / aspectRatio)));
+      const imgObj = {
+        id: generateId(),
+        url: emote.url,
+        name: emote.name || 'Emote 7TV',
+        source: '7tv',
+        animated: Boolean(emote.animated),
+        x: 80,
+        y: 80,
+        width,
+        height,
+        rotation: 0,
+        flipX: false,
+        viewerVisible: false
+      };
+      STATE.images.push(imgObj);
+      if (!imageCache.has(imgObj.url)) {
+        const image = new Image();
+        image.crossOrigin = 'anonymous';
+        image.src = imgObj.url;
+        imageCache.set(imgObj.url, image);
+      }
+      try { socket.send(JSON.stringify({ type: 'image:add', payload: imgObj })); } catch (_) {}
+      selectedImageId = imgObj.id;
+      updateCanvasImagesUI();
+      redraw();
+    }
+
+    function renderSevenTvResults(emotes) {
+      if (!sevenTvResults) return;
+      sevenTvResults.innerHTML = '';
+      (emotes || []).forEach(emote => {
+        const card = document.createElement('article'); card.className = 'emote-card';
+        const preview = document.createElement('img');
+        preview.src = emote.url; preview.alt = emote.name; preview.loading = 'lazy';
+        preview.addEventListener('error', () => { preview.alt = 'Vista previa no disponible'; preview.classList.add('is-unavailable'); });
+        const name = document.createElement('span'); name.className = 'emote-card-name'; name.textContent = emote.name; name.title = emote.name;
+        const add = document.createElement('button'); add.type = 'button'; add.textContent = 'Añadir al canvas'; add.title = `Añadir ${emote.name} al canvas`;
+        add.addEventListener('click', () => addEmoteToCanvas(emote));
+        card.append(preview, name, add);
+        sevenTvResults.appendChild(card);
+      });
+    }
+
+    async function searchSevenTvEmotes() {
+      const query = sevenTvSearch ? sevenTvSearch.value.trim() : '';
+      if (query.length < 2) {
+        if (sevenTvStatus) sevenTvStatus.textContent = 'Ingresá al menos 2 caracteres para buscar.';
+        if (sevenTvResults) sevenTvResults.innerHTML = '';
+        return;
+      }
+      if (btnSearchSevenTv) btnSearchSevenTv.disabled = true;
+      if (sevenTvStatus) sevenTvStatus.textContent = 'Buscando emotes…';
+      try {
+        const result = await apiRequest(`/api/7tv/emotes?q=${encodeURIComponent(query)}`);
+        const emotes = result.emotes || [];
+        renderSevenTvResults(emotes);
+        if (sevenTvStatus) sevenTvStatus.textContent = emotes.length ? `${emotes.length} emotes encontrados.` : 'No encontramos emotes con esa búsqueda.';
+      } catch (error) {
+        if (sevenTvResults) sevenTvResults.innerHTML = '';
+        if (sevenTvStatus) sevenTvStatus.textContent = error.message || 'No se pudo buscar en 7TV ahora.';
+      } finally {
+        if (btnSearchSevenTv) btnSearchSevenTv.disabled = false;
+      }
+    }
+
+    sevenTvSearchForm && sevenTvSearchForm.addEventListener('submit', event => {
+      event.preventDefault();
+      searchSevenTvEmotes();
+    });
+
     function updateImagesLibraryUI() {
       imagesList.innerHTML = '';
       STATE.assets.images.forEach(a => {

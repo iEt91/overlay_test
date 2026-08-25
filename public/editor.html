@@ -40,6 +40,7 @@
       <nav class="tool-rail" aria-label="Herramientas">
         <button class="tab-btn active" data-tab="tools" title="Pincel"><span class="tool-icon">✎</span><span>Pincel</span></button>
         <button class="tab-btn" data-tab="images" title="Imágenes y GIFs"><span class="tool-icon">▧</span><span>Imágenes / GIFs</span></button>
+        <button class="tab-btn" data-tab="emotes" title="Emotes 7TV"><span class="tool-icon tool-icon-7tv">7</span><span>Emotes<br>7TV</span></button>
         <button class="tab-btn" data-tab="audio" title="Audio"><span class="tool-icon">♬</span><span>Audio</span></button>
         <button class="tab-btn" data-tab="paragraphs" title="Texto y cronómetros"><span class="tool-icon">T</span><span>Texto y cronómetros</span></button>
         <button class="tab-btn" data-tab="scenes" title="Escenas"><span class="tool-icon">▤</span><span>Escenas</span></button>
@@ -65,6 +66,18 @@
           <div class="section-divider"></div>
           <h3>En el canvas</h3><p class="small">Arrastrá, redimensioná y elegí qué imágenes se ven en el Viewer.</p>
           <div id="canvasImagesList"></div>
+        </div>
+
+        <div class="panel tab-panel" id="panel-emotes" data-tab="emotes" style="display:none">
+          <div class="panel-title"><span class="eyebrow">COMUNIDAD</span><h2>Emotes 7TV</h2></div>
+          <p class="small">Buscá emotes públicos de 7TV y agregalos al canvas como una imagen o GIF.</p>
+          <form id="sevenTvSearchForm" class="emote-search" role="search">
+            <input id="sevenTvSearch" type="search" minlength="2" maxlength="64" autocomplete="off" spellcheck="false" placeholder="Buscar un emote" aria-label="Buscar emotes en 7TV">
+            <button id="btn-search-7tv" type="submit">Buscar</button>
+          </form>
+          <p id="sevenTvStatus" class="small emote-status">Ingresá al menos 2 caracteres para buscar.</p>
+          <div id="sevenTvResults" class="emote-results" aria-live="polite"></div>
+          <p class="small emote-attribution">Emotes públicos vía 7TV. Se agregan ocultos: activalos con el ícono del ojo cuando estés listo.</p>
         </div>
 
         <div class="panel tab-panel" id="panel-audio" data-tab="audio" style="display:none">

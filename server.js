@@ -37,6 +37,8 @@ const SESSION_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
 const ROOM_PASSWORD_MIN_LENGTH = 10;
 const ROOM_PASSWORD_MAX_LENGTH = 128;
 const EDITOR_WHITELIST_LIMIT = 2;
+const SEVEN_TV_SEARCH_CACHE_MS = 60 * 1000;
+const sevenTvSearchCache = new Map();
 const supabaseAdmin = SUPABASE_URL && SUPABASE_SECRET_KEY
   ? createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
@@ -1013,6 +1015,62 @@ app.post('/state', requireEditorApi, async (req, res) => {
     res.json({ ok: true, serverTime: state.updatedAt });
   } catch (_) {
     res.status(503).json({ error: 'No se pudo guardar la escena.' });
+  }
+});
+
+// 7TV mantiene el catálogo y los archivos en su propia CDN. Este proxy sólo
+// consulta resultados públicos, evita exponer la búsqueda directamente y no
+// descarga ni guarda emotes en nuestros servidores.
+app.get('/api/7tv/emotes', requireEditorApi, async (req, res) => {
+  const search = String(req.query.q || '').trim().slice(0, 64);
+  if (search.length < 2) return res.status(400).json({ error: 'Ingresá al menos 2 caracteres para buscar emotes.' });
+
+  const cacheKey = search.toLocaleLowerCase('es');
+  const cached = sevenTvSearchCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return res.json({ emotes: cached.emotes });
+
+  const query = `query SearchEmotes($query: String!, $page: Int!, $limit: Int!) {
+    emotes(query: $query, page: $page, limit: $limit) {
+      items {
+        id
+        name
+        animated
+        host { url files { name format width height } }
+      }
+    }
+  }`;
+
+  try {
+    const response = await fetch('https://api.7tv.app/v3/gql', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables: { query: search, page: 1, limit: 24 } }),
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!response.ok) throw new Error(`7TV respondió ${response.status}`);
+    const payload = await response.json();
+    const items = payload?.data?.emotes?.items || [];
+    const emotes = items.map(item => {
+      const files = Array.isArray(item?.host?.files) ? item.host.files : [];
+      const preferredName = item.animated ? '4x.gif' : '4x.webp';
+      const file = files.find(entry => entry.name === preferredName)
+        || files.find(entry => entry.name === (item.animated ? '3x.gif' : '3x.webp'))
+        || files[files.length - 1];
+      if (!item?.host?.url || !file?.name || !item?.name) return null;
+      return {
+        id: String(item.id),
+        name: String(item.name).slice(0, 120),
+        animated: Boolean(item.animated),
+        url: `https:${item.host.url}/${file.name}`,
+        width: Number(file.width) || 256,
+        height: Number(file.height) || 256
+      };
+    }).filter(Boolean);
+    sevenTvSearchCache.set(cacheKey, { emotes, expiresAt: Date.now() + SEVEN_TV_SEARCH_CACHE_MS });
+    res.json({ emotes });
+  } catch (error) {
+    console.warn('No se pudo consultar 7TV:', error.message);
+    res.status(502).json({ error: 'No se pudo buscar en 7TV ahora. Volvé a intentarlo.' });
   }
 });
 
