@@ -1243,6 +1243,40 @@ document.addEventListener('DOMContentLoaded', () => {
       redraw();
     }
 
+    function saveSevenTvEmoteToLibrary(emote) {
+      if (!emote || !emote.url) return;
+      STATE.assets.images ||= [];
+      const sourceId = String(emote.id || '');
+      const alreadySaved = STATE.assets.images.some(asset =>
+        asset.source === '7tv' && (asset.url === emote.url || (sourceId && asset.sourceId === sourceId))
+      );
+      if (alreadySaved) {
+        if (sevenTvStatus) sevenTvStatus.textContent = `“${emote.name}” ya está en tu biblioteca.`;
+        return;
+      }
+
+      const asset = {
+        id: generateId(),
+        url: emote.url,
+        name: emote.name || 'Emote 7TV',
+        source: '7tv',
+        sourceId,
+        animated: Boolean(emote.animated),
+        width: Number(emote.width) || 256,
+        height: Number(emote.height) || 256
+      };
+      STATE.assets.images.push(asset);
+      if (!imageCache.has(asset.url)) {
+        const image = new Image();
+        image.crossOrigin = 'anonymous';
+        image.src = asset.url;
+        imageCache.set(asset.url, image);
+      }
+      try { socket.send(JSON.stringify({ type: 'asset:image:add', payload: asset })); } catch (_) {}
+      updateImagesLibraryUI();
+      if (sevenTvStatus) sevenTvStatus.textContent = `“${asset.name}” se guardó en tu biblioteca.`;
+    }
+
     function renderSevenTvResults(emotes) {
       if (!sevenTvResults) return;
       sevenTvResults.innerHTML = '';
@@ -1252,9 +1286,13 @@ document.addEventListener('DOMContentLoaded', () => {
         preview.src = emote.url; preview.alt = emote.name; preview.loading = 'lazy';
         preview.addEventListener('error', () => { preview.alt = 'Vista previa no disponible'; preview.classList.add('is-unavailable'); });
         const name = document.createElement('span'); name.className = 'emote-card-name'; name.textContent = emote.name; name.title = emote.name;
+        const actions = document.createElement('div'); actions.className = 'emote-card-actions';
+        const save = document.createElement('button'); save.type = 'button'; save.textContent = 'Añadir a biblioteca'; save.title = `Guardar ${emote.name} en la biblioteca`;
+        save.addEventListener('click', () => saveSevenTvEmoteToLibrary(emote));
         const add = document.createElement('button'); add.type = 'button'; add.textContent = 'Añadir al canvas'; add.title = `Añadir ${emote.name} al canvas`;
         add.addEventListener('click', () => addEmoteToCanvas(emote));
-        card.append(preview, name, add);
+        actions.append(save, add);
+        card.append(preview, name, actions);
         sevenTvResults.appendChild(card);
       });
     }
@@ -1304,7 +1342,25 @@ document.addEventListener('DOMContentLoaded', () => {
         imagesList.appendChild(el);
         add.addEventListener('click', () => {
           // add outside safe zone (to the right)
-          const imgObj = { id: generateId(), url: a.url, x: 80, y: 80, width: 300, height: 200, rotation: 0, flipX: false, viewerVisible: false };
+          const naturalWidth = Number(a.width) || 300;
+          const naturalHeight = Number(a.height) || 200;
+          const aspectRatio = Math.max(.2, Math.min(5, naturalWidth / naturalHeight));
+          const width = 300;
+          const height = Math.max(60, Math.min(360, Math.round(width / aspectRatio)));
+          const imgObj = {
+            id: generateId(),
+            url: a.url,
+            name: a.name || 'Imagen',
+            source: a.source,
+            animated: Boolean(a.animated),
+            x: 80,
+            y: 80,
+            width,
+            height,
+            rotation: 0,
+            flipX: false,
+            viewerVisible: false
+          };
           STATE.images.push(imgObj);
           if (!imageCache.has(a.url)) { const im = new Image(); im.crossOrigin='anonymous'; im.src=a.url; imageCache.set(a.url,im); }
           try { socket.send(JSON.stringify({ type:'image:add', payload: imgObj })); } catch(e){}

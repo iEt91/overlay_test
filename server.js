@@ -1643,8 +1643,14 @@ wss.on('connection', (ws, req) => {
       // assets (biblioteca)
       case 'asset:image:add':
         if (data.payload) {
-          STATE.assets.images.push(data.payload);
-          STATE.updatedAt = Date.now();
+          const incomingAsset = data.payload;
+          const isDuplicateSevenTvAsset = incomingAsset.source === '7tv' && STATE.assets.images.some(asset =>
+            asset.source === '7tv' && (asset.url === incomingAsset.url || (incomingAsset.sourceId && asset.sourceId === incomingAsset.sourceId))
+          );
+          if (!isDuplicateSevenTvAsset) {
+            STATE.assets.images.push(incomingAsset);
+            STATE.updatedAt = Date.now();
+          }
         }
         broadcastWS({ type: 'assets:update', payload: STATE.assets }, null);
         break;
