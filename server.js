@@ -26,6 +26,9 @@ const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET?.trim();
 // Sólo para pruebas internas: permite al propietario previsualizar otro canal
 // sin cambiar el canal real del proyecto ni exponer esa opción a invitados.
 const ALLOW_TEST_CHANNEL_OVERRIDE = process.env.ALLOW_TEST_CHANNEL_OVERRIDE === 'true';
+// Durante la beta el acceso no vence automáticamente. Cuando haya planes pagos,
+// se activa explícitamente en el host con ENFORCE_SUBSCRIPTIONS=true.
+const ENFORCE_SUBSCRIPTIONS = process.env.ENFORCE_SUBSCRIPTIONS === 'true';
 
 // La clave de sesión debe existir únicamente en .env. Nunca se envía al navegador.
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -674,25 +677,25 @@ async function findViewerProject(token) {
   const stableMatch = String(token).match(/^v1\.([0-9a-f-]{36})\.([A-Za-z0-9_-]{40,})$/i);
   if (stableMatch) {
     const result = await supabaseAdmin.from('projects')
-      .select('id, viewer_token_hash, overlay_enabled, subscription_status, trial_ends_at')
+      .select('id, viewer_token_hash, overlay_enabled, subscription_status, trial_ends_at, trial_watermark_enabled, twitch_channel_login')
       .eq('id', stableMatch[1])
       .maybeSingle();
     const project = databaseError(result, 'No se pudo validar el Viewer.');
     if (!project || !safeEqual(stableMatch[2], persistentViewerToken(project).split('.')[2])) return null;
     if (project.subscription_status === 'suspended' || project.subscription_status === 'canceled') return null;
-    if (project.subscription_status === 'trialing' && project.trial_ends_at && new Date(project.trial_ends_at) <= new Date()) return null;
+    if (ENFORCE_SUBSCRIPTIONS && project.subscription_status === 'trialing' && project.trial_ends_at && new Date(project.trial_ends_at) <= new Date()) return null;
     delete project.viewer_token_hash;
     return project;
   }
   // Compatibilidad con los enlaces temporales emitidos por versiones previas.
   if (token.length < 30) return null;
   const result = await supabaseAdmin.from('projects')
-    .select('id, overlay_enabled, subscription_status, trial_ends_at')
+    .select('id, overlay_enabled, subscription_status, trial_ends_at, trial_watermark_enabled, twitch_channel_login')
     .eq('viewer_token_hash', hashOpaqueToken(token))
     .maybeSingle();
   const project = databaseError(result, 'No se pudo validar el Viewer.');
   if (!project || project.subscription_status === 'suspended' || project.subscription_status === 'canceled') return null;
-  if (project.subscription_status === 'trialing' && project.trial_ends_at && new Date(project.trial_ends_at) <= new Date()) return null;
+  if (ENFORCE_SUBSCRIPTIONS && project.subscription_status === 'trialing' && project.trial_ends_at && new Date(project.trial_ends_at) <= new Date()) return null;
   return project;
 }
 
@@ -973,7 +976,8 @@ app.get('/viewer/:token', async (req, res) => {
     const project = await findViewerProject(req.params.token);
     if (!project) return res.status(404).send('El enlace del Viewer no es válido o ya no está activo.');
     const viewerHtml = fs.readFileSync(path.join(__dirname, 'public', 'viewer.html'), 'utf8');
-    const bootstrap = `<script>window.__TANGO_VIEWER_TOKEN__=${JSON.stringify(req.params.token)};</script>`;
+    const showTrialWatermark = project.subscription_status === 'trialing' && project.trial_watermark_enabled !== false;
+    const bootstrap = `<script>window.__TANGO_VIEWER_TOKEN__=${JSON.stringify(req.params.token)};window.__TANGO_TRIAL_WATERMARK__=${JSON.stringify(showTrialWatermark ? { channel: project.twitch_channel_login || '' } : null)};</script>`;
     res.type('html').send(viewerHtml.replace('</head>', `${bootstrap}</head>`));
   } catch (_) {
     res.status(503).send('No se pudo abrir el Viewer. Volvé a intentarlo.');

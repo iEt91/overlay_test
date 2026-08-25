@@ -11,6 +11,21 @@ const container = document.getElementById('viewerContainer');
 const canvas = document.getElementById('viewerCanvas');
 const ctx = canvas && canvas.getContext ? canvas.getContext('2d', { alpha: true }) : null;
 const imageLayer = document.getElementById('viewerImageLayer');
+const trialWatermark = document.getElementById('trialWatermark');
+const trialWatermarkChannel = document.getElementById('trialWatermarkChannel');
+
+function renderTrialWatermark() {
+  const config = window.__TANGO_TRIAL_WATERMARK__;
+  if (!trialWatermark) return;
+  if (!config) {
+    trialWatermark.style.display = 'none';
+    return;
+  }
+  if (trialWatermarkChannel) trialWatermarkChannel.textContent = config.channel ? `@${config.channel}` : 'Canal de prueba';
+  trialWatermark.style.display = 'inline-flex';
+}
+
+renderTrialWatermark();
 
 // ----------------------------- Estado mundial -----------------------------
 const imageCache = new Map();

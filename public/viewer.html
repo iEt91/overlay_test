@@ -9,12 +9,16 @@
     #viewerContainer { position:relative; width:1920px; height:1080px; background:transparent; }
     #viewerImageLayer { position:absolute; left:0; top:0; z-index:1; pointer-events:none; }
     #viewerCanvas { position:absolute; left:0; top:0; z-index:2; }
+    #trialWatermark { position:absolute; top:42px; right:46px; z-index:10; display:none; align-items:center; gap:14px; padding:14px 19px; border:1px solid rgba(255,255,255,.68); border-radius:8px; background:rgba(5,12,12,.62); color:rgba(255,255,255,.96); box-shadow:0 7px 22px rgba(0,0,0,.27); font-family:Arial,sans-serif; pointer-events:none; text-transform:uppercase; }
+    #trialWatermark .trial-brand { color:#59e0d4; font-size:21px; font-weight:800; letter-spacing:.09em; }
+    #trialWatermark .trial-channel { padding-left:14px; border-left:1px solid rgba(255,255,255,.35); font-size:18px; font-weight:700; letter-spacing:.035em; }
   </style>
 </head>
 <body>
   <div id="viewerContainer">
     <canvas id="viewerCanvas"></canvas>
     <div id="viewerImageLayer" aria-hidden="true"></div>
+    <div id="trialWatermark" aria-hidden="true"><span class="trial-brand">Tango GG · Prueba</span><span id="trialWatermarkChannel" class="trial-channel"></span></div>
   </div>
   <script type="module" src="/js/viewer.js"></script>
 </body>
