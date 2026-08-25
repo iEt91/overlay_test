@@ -14,7 +14,12 @@
   --radius: 8px;
 }
 
-* { box-sizing: border-box; }
+* { box-sizing: border-box; scrollbar-color: #465f5d #0d1415; scrollbar-width: thin; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: #0d1415; border-radius: 999px; }
+*::-webkit-scrollbar-thumb { border: 2px solid #0d1415; border-radius: 999px; background: #465f5d; }
+*::-webkit-scrollbar-thumb:hover { background: #62817d; }
+*::-webkit-scrollbar-corner { background: #0d1415; }
 html, body, #app { height: 100%; margin: 0; }
 body { min-width: 1120px; overflow: hidden; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; }
 button, input, select, textarea { font: inherit; }
@@ -96,10 +101,6 @@ input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); ou
 .panel button.danger-action:hover { background: rgba(220,105,105,.12); }
 .button-row { display: flex; gap: 7px; }
 .button-row button { flex: 1; }
-.test-channel-controls { margin-top: 14px; padding: 11px; border: 1px dashed #354445; border-radius: 5px; background: rgba(16,23,24,.55); }
-.test-channel-controls input { height: 34px; margin: 5px 0 0; padding: 0 9px; font-size: 12px; }
-.test-channel-controls .button-row button { min-height: 31px; margin-top: 8px; }
-.test-channel-controls .small { margin: 9px 0 0; }
 .status-card { padding: 10px; border: 1px solid #2d3a3b; border-radius: 5px; background: #101718; color: #b9c7c5; font-size: 11px; line-height: 1.5; }
 .panel label.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; cursor: pointer; }
 .toggle-row input { position: absolute; opacity: 0; pointer-events: none; }
@@ -181,11 +182,6 @@ input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); ou
 .slot-popover { position: fixed; z-index: 1000; display: grid; grid-template-columns: repeat(5, 30px); gap: 5px; padding: 7px; border: 1px solid #526666; border-radius: 7px; background: #162021; box-shadow: 0 14px 32px rgba(0,0,0,.52); }
 .slot-popover button { display: grid; place-items: center; width: 30px; min-width: 30px; height: 28px; min-height: 28px; margin: 0; padding: 0; border: 1px solid #3b4a4b; border-radius: 4px; background: #1d292a; color: #dce7e5; font-size: 11px; }
 .slot-popover button:hover { border-color: var(--accent); background: var(--accent-soft); color: #edffff; }
-.activity-list { display: grid; gap: 0; max-height: 260px; overflow-y: auto; border-top: 1px solid #2a3637; }
-.activity-item { display: grid; gap: 3px; padding: 10px 0; border-bottom: 1px solid #2a3637; }
-.activity-item strong { color: #dce7e5; font-size: 11px; font-weight: 650; }
-.activity-item span { color: #839290; font-size: 10px; }
-.activity-empty { margin: 0; padding: 10px 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
 
 @media (max-width: 1340px) {
   body { min-width: 950px; }

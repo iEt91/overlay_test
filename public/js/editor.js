@@ -111,7 +111,6 @@ document.addEventListener('DOMContentLoaded', () => {
           STATE.audio.current = { ...(STATE.audio.current || {}), ...(msg.payload || {}), paused: false };
           updateSoundboardUI();
         }
-        scheduleActivityRefresh();
       } catch (e) { console.warn('ws parse', e); }
     });
 
@@ -148,10 +147,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnHideStream = document.getElementById('btn-hide-stream');
     const accountSummary = document.getElementById('accountSummary');
     const linkedChannel = document.getElementById('linkedChannel');
-    const testChannelControls = document.getElementById('testChannelControls');
-    const testChannelInput = document.getElementById('testChannelInput');
-    const btnUseTestChannel = document.getElementById('btn-use-test-channel');
-    const btnResetTestChannel = document.getElementById('btn-reset-test-channel');
     const viewerUrlStatus = document.getElementById('viewerUrlStatus');
     const btnCopyViewer = document.getElementById('btn-copy-viewer');
     const btnResetRoomPassword = document.getElementById('btn-reset-room-password');
@@ -166,7 +161,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnAddWhitelist = document.getElementById('btn-add-whitelist');
     const whitelistList = document.getElementById('whitelistList');
     const membersList = document.getElementById('membersList');
-    const activityList = document.getElementById('activityList');
     const roomSummary = document.getElementById('roomSummary');
     const roomCode = document.getElementById('roomCode');
     const realtimeStatus = document.getElementById('realtimeStatus');
@@ -199,8 +193,6 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     let PROJECT_INFO = null;
     let latestViewerUrl = null;
-    let activityRefreshTimer = null;
-    let testPreviewChannel = sessionStorage.getItem('tango.test-preview-channel') || '';
     let chatDismissed = false;
     let activeSlotPopover = null;
     let activeSlotAnchor = null;
@@ -277,13 +269,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function screenToWorld(p) { return { x: p.x / transform.scale + transform.tx, y: p.y / transform.scale + transform.ty }; }
     function generateId() { return Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6).toString(36); }
     function isGifUrl(url) { return /\.gif(\?.*)?$/i.test(url); }
-    function normalizeTwitchChannel(value) {
-      const raw = String(value || '').trim().toLowerCase();
-      const match = raw.match(/(?:twitch\.tv\/)?([a-z0-9_]{4,25})(?:[/?#].*)?$/i);
-      return match ? match[1].toLowerCase() : null;
-    }
     function currentPreviewChannel() {
-      return testPreviewChannel || (PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.twitch_channel_login);
+      return PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.twitch_channel_login;
     }
     function showStreamPreview() {
       const channel = currentPreviewChannel();
@@ -349,8 +336,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       if (linkedChannel) linkedChannel.textContent = `Canal bloqueado: twitch.tv/${project.twitch_channel_login}`;
       document.querySelectorAll('.owner-only').forEach(el => { el.style.display = owner ? '' : 'none'; });
-      if (testChannelControls) testChannelControls.hidden = !(owner && payload.testChannelOverrideEnabled);
-      if (testChannelInput) testChannelInput.value = testPreviewChannel;
       if (chatEnabled) chatEnabled.checked = Boolean(project.chat_enabled);
       if (payload.viewerUrl) {
         latestViewerUrl = payload.viewerUrl;
@@ -366,7 +351,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function loadProjectInfo() {
       try {
         renderProjectInfo(await apiRequest('/api/project'));
-        await Promise.all([loadMembers(), loadWhitelist(), loadActivity()]);
+        await Promise.all([loadMembers(), loadWhitelist()]);
       }
       catch (error) { if (accountSummary) accountSummary.textContent = error.message; }
     }
@@ -417,64 +402,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (PROJECT_INFO?.role !== 'owner') return;
       try { const result = await apiRequest('/api/project/whitelist'); renderWhitelist(result.entries || []); }
       catch (_) { if (whitelistList) whitelistList.innerHTML = '<p class="small">No se pudo cargar la whitelist.</p>'; }
-    }
-    const activityLabels = {
-      'project.created': 'creó el proyecto',
-      'member.invite_created': 'creó una invitación de moderador',
-      'member.invite_accepted': 'aceptó una invitación',
-      'member.whitelist_added': 'autorizó a un moderador',
-      'member.whitelist_removed': 'quitó a un moderador autorizado',
-      'room.password_set': 'protegió la sala con contraseña',
-      'room.password_reset': 'restableció la contraseña de la sala',
-      'member.removed': 'quitó a un invitado',
-      'overlay.panic_enabled': 'ocultó todo el overlay',
-      'overlay.restored': 'restauró el overlay',
-      'project.settings_updated': 'cambió la configuración',
-      'scene.saved': 'guardó la escena',
-      'stroke.end': 'dibujó un trazo',
-      'image.add': 'añadió una imagen al canvas',
-      'image.update': 'modificó una imagen',
-      'image.remove': 'eliminó una imagen del canvas',
-      'asset.image.add': 'subió una imagen a la biblioteca',
-      'asset.image.delete': 'eliminó una imagen de la biblioteca',
-      'asset.audio.add': 'subió un audio a la biblioteca',
-      'asset.audio.delete': 'eliminó un audio de la biblioteca',
-      'text.add': 'añadió un texto',
-      'text.update': 'modificó un texto',
-      'text.remove': 'eliminó un texto',
-      'timer.add': 'añadió un cronómetro',
-      'timer.update': 'modificó un cronómetro',
-      'timer.remove': 'eliminó un cronómetro',
-      'audio.trigger': 'reprodujo un sonido',
-      'audio.stop': 'detuvo el sonido',
-      'audio.pause': 'pausó el sonido',
-      'audio.resume': 'reanudó el sonido'
-    };
-    function renderActivity(events) {
-      if (!activityList) return;
-      activityList.innerHTML = '';
-      if (!events.length) {
-        activityList.innerHTML = '<p class="activity-empty">Todavía no hay cambios registrados.</p>';
-        return;
-      }
-      events.forEach(event => {
-        const row = document.createElement('div'); row.className = 'activity-item';
-        const description = document.createElement('strong');
-        const actor = event.actor?.login ? `@${event.actor.login}` : 'Sistema';
-        description.textContent = `${actor} ${activityLabels[event.action] || event.action}`;
-        const timestamp = document.createElement('span');
-        timestamp.textContent = new Intl.DateTimeFormat('es-AR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(event.createdAt));
-        row.append(description, timestamp);
-        activityList.appendChild(row);
-      });
-    }
-    async function loadActivity() {
-      try { const result = await apiRequest('/api/project/audit'); renderActivity(result.events || []); }
-      catch (_) { if (activityList) activityList.innerHTML = '<p class="activity-empty">No se pudo cargar la actividad.</p>'; }
-    }
-    function scheduleActivityRefresh() {
-      clearTimeout(activityRefreshTimer);
-      activityRefreshTimer = setTimeout(loadActivity, 1800);
     }
     async function copyViewerUrl() {
       if (!latestViewerUrl) { alert('La URL permanente todavía no está disponible. Recargá el editor.'); return; }
@@ -1091,22 +1018,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     btnShowStream && btnShowStream.addEventListener('click', showStreamPreview);
     btnHideStream && btnHideStream.addEventListener('click', () => { streamPreview.innerHTML = ''; streamPreview.style.display = 'none'; setStreamInteraction(false); });
-    btnUseTestChannel && btnUseTestChannel.addEventListener('click', () => {
-      const channel = normalizeTwitchChannel(testChannelInput && testChannelInput.value);
-      if (!channel) { alert('Escribí un usuario de Twitch válido, por ejemplo: ibai.'); return; }
-      testPreviewChannel = channel;
-      sessionStorage.setItem('tango.test-preview-channel', channel);
-      if (testChannelInput) testChannelInput.value = channel;
-      showStreamPreview();
-      setChatVisibility(Boolean(PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.chat_enabled), { refreshChannel: true });
-    });
-    btnResetTestChannel && btnResetTestChannel.addEventListener('click', () => {
-      testPreviewChannel = '';
-      sessionStorage.removeItem('tango.test-preview-channel');
-      if (testChannelInput) testChannelInput.value = '';
-      showStreamPreview();
-      setChatVisibility(Boolean(PROJECT_INFO && PROJECT_INFO.project && PROJECT_INFO.project.chat_enabled), { refreshChannel: true });
-    });
     btnCopyViewer && btnCopyViewer.addEventListener('click', copyViewerUrl);
     btnResetRoomPassword && btnResetRoomPassword.addEventListener('click', () => {
       location.assign('/room/access?reset=1');
@@ -1126,7 +1037,21 @@ document.addEventListener('DOMContentLoaded', () => {
         renderProjectInfo({ ...PROJECT_INFO, project: { ...PROJECT_INFO.project, ...result.project } });
       } catch (error) { chatEnabled.checked = !chatEnabled.checked; alert(error.message); }
     });
-    btnCloseChat && btnCloseChat.addEventListener('click', () => { chatDismissed = true; if (twitchChatPanel) twitchChatPanel.hidden = true; });
+    btnCloseChat && btnCloseChat.addEventListener('click', async () => {
+      chatDismissed = true;
+      if (twitchChatPanel) twitchChatPanel.hidden = true;
+      if (!chatEnabled || !chatEnabled.checked || !PROJECT_INFO || PROJECT_INFO.role !== 'owner') return;
+      chatEnabled.checked = false;
+      try {
+        const result = await apiRequest('/api/project/settings', { method: 'PATCH', body: JSON.stringify({ chatEnabled: false }) });
+        renderProjectInfo({ ...PROJECT_INFO, project: { ...PROJECT_INFO.project, ...result.project } });
+      } catch (error) {
+        chatDismissed = false;
+        chatEnabled.checked = true;
+        setChatVisibility(true, { reveal: true });
+        alert(error.message);
+      }
+    });
     btnCreateInvite && btnCreateInvite.addEventListener('click', async () => {
       try {
         const result = await apiRequest('/api/project/invites', { method: 'POST' });
