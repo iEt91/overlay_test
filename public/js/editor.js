@@ -136,6 +136,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnSearchSevenTv = document.getElementById('btn-search-7tv');
     const sevenTvStatus = document.getElementById('sevenTvStatus');
     const sevenTvResults = document.getElementById('sevenTvResults');
+    const sevenTvPagination = document.getElementById('sevenTvPagination');
+    const btnSevenTvPrev = document.getElementById('btn-7tv-prev');
+    const btnSevenTvNext = document.getElementById('btn-7tv-next');
+    const sevenTvPageNumbers = document.getElementById('sevenTvPageNumbers');
     const audioFile = document.getElementById('audioFile');
     const btnUploadAudio = document.getElementById('btn-upload-audio');
     const audioList = document.getElementById('audioList');
@@ -201,6 +205,10 @@ document.addEventListener('DOMContentLoaded', () => {
     let chatDismissed = false;
     let activeSlotPopover = null;
     let activeSlotAnchor = null;
+    let sevenTvPage = 1;
+    let sevenTvHasNext = false;
+    let sevenTvQuery = '';
+    let sevenTvLoading = false;
 
     function updateRealtimeStatus(message, offline = false) {
       if (!realtimeStatus || !roomSummary) return;
@@ -1287,9 +1295,9 @@ document.addEventListener('DOMContentLoaded', () => {
         preview.addEventListener('error', () => { preview.alt = 'Vista previa no disponible'; preview.classList.add('is-unavailable'); });
         const name = document.createElement('span'); name.className = 'emote-card-name'; name.textContent = emote.name; name.title = emote.name;
         const actions = document.createElement('div'); actions.className = 'emote-card-actions';
-        const save = document.createElement('button'); save.type = 'button'; save.textContent = 'Añadir a biblioteca'; save.title = `Guardar ${emote.name} en la biblioteca`;
+        const save = createLibraryButton('emote-save', `Guardar ${emote.name} en la biblioteca`, libraryIconMarkup());
         save.addEventListener('click', () => saveSevenTvEmoteToLibrary(emote));
-        const add = document.createElement('button'); add.type = 'button'; add.textContent = 'Añadir al canvas'; add.title = `Añadir ${emote.name} al canvas`;
+        const add = createLibraryButton('emote-add', `Añadir ${emote.name} al canvas`, '+');
         add.addEventListener('click', () => addEmoteToCanvas(emote));
         actions.append(save, add);
         card.append(preview, name, actions);
@@ -1297,48 +1305,93 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     }
 
-    async function searchSevenTvEmotes() {
+    function renderSevenTvPagination() {
+      if (!sevenTvPagination || !sevenTvPageNumbers) return;
+      const visible = Boolean(sevenTvQuery);
+      sevenTvPagination.hidden = !visible;
+      if (!visible) return;
+
+      btnSevenTvPrev && (btnSevenTvPrev.disabled = sevenTvLoading || sevenTvPage <= 1);
+      btnSevenTvNext && (btnSevenTvNext.disabled = sevenTvLoading || !sevenTvHasNext);
+      sevenTvPageNumbers.innerHTML = '';
+
+      const pages = new Set([1, sevenTvPage]);
+      if (sevenTvPage > 2) pages.add(sevenTvPage - 1);
+      if (sevenTvHasNext) pages.add(sevenTvPage + 1);
+      const orderedPages = [...pages].sort((a, b) => a - b);
+      let previous = 0;
+      orderedPages.forEach(page => {
+        if (previous && page - previous > 1) {
+          const gap = document.createElement('span'); gap.className = 'emote-page-ellipsis'; gap.textContent = '…';
+          sevenTvPageNumbers.appendChild(gap);
+        }
+        const button = document.createElement('button');
+        button.type = 'button'; button.textContent = String(page); button.title = `Página ${page}`;
+        button.disabled = sevenTvLoading; button.classList.toggle('is-current', page === sevenTvPage);
+        button.setAttribute('aria-current', page === sevenTvPage ? 'page' : 'false');
+        button.addEventListener('click', () => {
+          if (page !== sevenTvPage) searchSevenTvEmotes(page);
+        });
+        sevenTvPageNumbers.appendChild(button);
+        previous = page;
+      });
+    }
+
+    async function searchSevenTvEmotes(targetPage = 1) {
       const query = sevenTvSearch ? sevenTvSearch.value.trim() : '';
       if (query.length < 2) {
         if (sevenTvStatus) sevenTvStatus.textContent = 'Ingresá al menos 2 caracteres para buscar.';
         if (sevenTvResults) sevenTvResults.innerHTML = '';
+        sevenTvQuery = ''; sevenTvHasNext = false; renderSevenTvPagination();
         return;
       }
+      const page = query === sevenTvQuery ? Math.max(1, targetPage) : 1;
       if (btnSearchSevenTv) btnSearchSevenTv.disabled = true;
+      sevenTvLoading = true; renderSevenTvPagination();
       if (sevenTvStatus) sevenTvStatus.textContent = 'Buscando emotes…';
       try {
-        const result = await apiRequest(`/api/7tv/emotes?q=${encodeURIComponent(query)}`);
+        const result = await apiRequest(`/api/7tv/emotes?q=${encodeURIComponent(query)}&page=${page}`);
         const emotes = result.emotes || [];
+        if (!emotes.length && page > 1) {
+          sevenTvHasNext = false;
+          if (sevenTvStatus) sevenTvStatus.textContent = 'No hay más páginas para esta búsqueda.';
+          return;
+        }
+        sevenTvQuery = query;
+        sevenTvPage = Number(result.page) || page;
+        sevenTvHasNext = Boolean(result.hasNext);
         renderSevenTvResults(emotes);
-        if (sevenTvStatus) sevenTvStatus.textContent = emotes.length ? `${emotes.length} emotes encontrados.` : 'No encontramos emotes con esa búsqueda.';
+        if (sevenTvStatus) sevenTvStatus.textContent = emotes.length ? `${emotes.length} emotes · página ${sevenTvPage}.` : 'No encontramos emotes con esa búsqueda.';
       } catch (error) {
         if (sevenTvResults) sevenTvResults.innerHTML = '';
         if (sevenTvStatus) sevenTvStatus.textContent = error.message || 'No se pudo buscar en 7TV ahora.';
       } finally {
+        sevenTvLoading = false; renderSevenTvPagination();
         if (btnSearchSevenTv) btnSearchSevenTv.disabled = false;
       }
     }
 
     sevenTvSearchForm && sevenTvSearchForm.addEventListener('submit', event => {
       event.preventDefault();
-      searchSevenTvEmotes();
+      searchSevenTvEmotes(1);
     });
+
+    btnSevenTvPrev && btnSevenTvPrev.addEventListener('click', () => searchSevenTvEmotes(sevenTvPage - 1));
+    btnSevenTvNext && btnSevenTvNext.addEventListener('click', () => searchSevenTvEmotes(sevenTvPage + 1));
 
     function updateImagesLibraryUI() {
       imagesList.innerHTML = '';
       STATE.assets.images.forEach(a => {
-        const el = document.createElement('div'); el.className = 'lib-item';
-        const main = document.createElement('div'); main.className = 'library-item-main';
+        const el = document.createElement('article'); el.className = 'emote-card asset-library-card';
         const preview = document.createElement('img');
         preview.className = 'library-thumbnail'; preview.src = a.url; preview.alt = a.name; preview.title = a.name;
         preview.loading = 'lazy'; preview.addEventListener('error', () => { preview.classList.add('is-unavailable'); preview.alt = 'Vista previa no disponible'; });
-        const actions = document.createElement('div'); actions.className = 'library-actions';
+        const name = document.createElement('span'); name.className = 'emote-card-name'; name.textContent = a.name || 'Imagen'; name.title = a.name || 'Imagen';
+        const actions = document.createElement('div'); actions.className = 'emote-card-actions';
         const remove = createLibraryButton('btn-delete asset-delete', 'Eliminar de la biblioteca', trashIconMarkup());
-        const add = createLibraryButton('btn-add', 'Agregar al canvas', '+');
-        // La papelera quita el archivo de la biblioteca; el + queda a la
-        // derecha para que sea la acción final y más habitual.
+        const add = createLibraryButton('btn-add emote-add', 'Agregar al canvas', '+');
         actions.append(remove, add);
-        main.append(preview, actions); el.append(main);
+        el.append(preview, name, actions);
         imagesList.appendChild(el);
         add.addEventListener('click', () => {
           // add outside safe zone (to the right)
@@ -1469,6 +1522,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function trashIconMarkup() {
       return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" /></svg>';
+    }
+
+    function libraryIconMarkup() {
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4zM9 4v16M15 4v16M6.5 8h1M11.5 8h1M17.5 8h1" /></svg>';
     }
 
     function slotIconMarkup() {

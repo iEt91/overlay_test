@@ -114,6 +114,7 @@ input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); ou
 .whitelist-entry input { min-width: 0; flex: 1; }
 .whitelist-entry button { flex: 0 0 auto; margin: 0; }
 .library-list { max-height: 47vh; margin-top: 13px; overflow: auto; }
+.asset-library-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-height: 47vh; margin-top: 13px; overflow: auto; }
 .emote-search { display: flex; gap: 7px; align-items: center; }
 .emote-search input { min-width: 0; flex: 1; }
 .panel .emote-search button { flex: 0 0 auto; margin: 0; }
@@ -123,7 +124,14 @@ input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); ou
 .emote-card img { display: block; width: 100%; height: 78px; border-radius: 4px; background: #172122; object-fit: contain; }
 .emote-card-name { overflow: hidden; color: #d5e0df; font-size: 10px; font-weight: 700; white-space: nowrap; text-overflow: ellipsis; }
 .emote-card-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
-.panel .emote-card-actions button { min-height: 32px; margin: 0; padding: 4px 5px; font-size: 9px; line-height: 1.15; }
+.panel .emote-card-actions button { display: grid; min-height: 32px; margin: 0; padding: 4px 5px; place-items: center; font-size: 18px; line-height: 1; }
+.emote-card-actions button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.emote-pagination { display: flex; align-items: center; justify-content: center; gap: 5px; margin-top: 12px; }
+.emote-page-numbers { display: flex; align-items: center; gap: 4px; }
+.panel .emote-pagination button { display: grid; width: 30px; min-width: 30px; min-height: 30px; margin: 0; padding: 3px; place-items: center; border: 1px solid #3b4a4b; border-radius: 4px; background: transparent; color: #cbd7d6; font-size: 12px; }
+.panel .emote-pagination button:hover:not(:disabled), .panel .emote-pagination button.is-current { border-color: var(--accent); color: #edffff; background: #123131; }
+.panel .emote-pagination button:disabled { cursor: not-allowed; opacity: .4; }
+.emote-page-ellipsis { color: var(--muted); font-size: 11px; }
 .emote-attribution { margin-top: 17px !important; padding-top: 13px; border-top: 1px solid #293536; }
 
 .inner-tabs { display: flex; gap: 0; margin: -20px -20px 20px; border-bottom: 1px solid var(--line); }
@@ -185,6 +193,7 @@ input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); ou
 .library-thumbnail { display: block; width: 48px; height: 36px; flex: 1 1 auto; min-width: 0; border: 1px solid #344344; border-radius: 4px; background: #172122; object-fit: contain; }
 .library-thumbnail:hover { border-color: var(--accent); }
 .library-thumbnail.is-unavailable { opacity: .35; }
+.asset-library-card .library-thumbnail { width: 100%; height: 78px; border: 0; border-radius: 4px; }
 .library-item-name, .canvas-object .object-name { display: block; min-width: 0; flex: 1; overflow: hidden; color: #c6d2d1; font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
 .library-actions, .canvas-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
 .canvas-object .eye-toggle, .canvas-object .mirror-toggle, .canvas-object .canvas-remove, .lib-item .asset-delete, .lib-item .slot-assign { display: grid; place-items: center; width: 28px; min-width: 28px; padding: 4px; }

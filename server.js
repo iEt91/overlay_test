@@ -1024,10 +1024,12 @@ app.post('/state', requireEditorApi, async (req, res) => {
 app.get('/api/7tv/emotes', requireEditorApi, async (req, res) => {
   const search = String(req.query.q || '').trim().slice(0, 64);
   if (search.length < 2) return res.status(400).json({ error: 'Ingresá al menos 2 caracteres para buscar emotes.' });
+  const requestedPage = Number.parseInt(String(req.query.page || '1'), 10);
+  const page = Number.isFinite(requestedPage) ? Math.min(1000, Math.max(1, requestedPage)) : 1;
 
-  const cacheKey = search.toLocaleLowerCase('es');
+  const cacheKey = `${search.toLocaleLowerCase('es')}:${page}`;
   const cached = sevenTvSearchCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return res.json({ emotes: cached.emotes });
+  if (cached && cached.expiresAt > Date.now()) return res.json({ emotes: cached.emotes, page, hasNext: cached.hasNext });
 
   const query = `query SearchEmotes($query: String!, $page: Int!, $limit: Int!) {
     emotes(query: $query, page: $page, limit: $limit) {
@@ -1044,7 +1046,7 @@ app.get('/api/7tv/emotes', requireEditorApi, async (req, res) => {
     const response = await fetch('https://api.7tv.app/v3/gql', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables: { query: search, page: 1, limit: 24 } }),
+      body: JSON.stringify({ query, variables: { query: search, page, limit: 24 } }),
       signal: AbortSignal.timeout(8000)
     });
     if (!response.ok) throw new Error(`7TV respondió ${response.status}`);
@@ -1066,8 +1068,12 @@ app.get('/api/7tv/emotes', requireEditorApi, async (req, res) => {
         height: Number(file.height) || 256
       };
     }).filter(Boolean);
-    sevenTvSearchCache.set(cacheKey, { emotes, expiresAt: Date.now() + SEVEN_TV_SEARCH_CACHE_MS });
-    res.json({ emotes });
+    // La API no devuelve un total confiable en esta variante del endpoint.
+    // Una página completa indica que puede haber otra; si la siguiente queda
+    // vacía el cliente desactiva el avance sin perder la página anterior.
+    const hasNext = emotes.length === 24;
+    sevenTvSearchCache.set(cacheKey, { emotes, hasNext, expiresAt: Date.now() + SEVEN_TV_SEARCH_CACHE_MS });
+    res.json({ emotes, page, hasNext });
   } catch (error) {
     console.warn('No se pudo consultar 7TV:', error.message);
     res.status(502).json({ error: 'No se pudo buscar en 7TV ahora. Volvé a intentarlo.' });
