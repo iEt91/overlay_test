@@ -314,7 +314,8 @@ function render() {
   const vp = WORLD.viewport || { x: 0, y: 0, width: 1920, height: 1080 };
   ctx.translate(-vp.x, -vp.y);
 
-  for (const img of WORLD.images || []) if (img.viewerVisible !== false && img.visible !== false) drawImageObject(img);
+  // Las imágenes se muestran en una única capa DOM para conservar el orden de
+  // apilado entre estáticas y GIFs. El canvas queda para texto y trazos.
   for (const text of WORLD.texts || []) if (text.viewerVisible !== false) drawText(text);
   for (const timer of WORLD.timers || []) if (timer.viewerVisible !== false) drawTimer(timer);
   for (const s of WORLD.strokes || []) drawStroke(s);
@@ -375,17 +376,21 @@ function drawImageObject(img) {
   } catch (e) { /* noop */ }
 }
 
-// DOM overlay para imágenes (GIFs animan nativo)
+// Capa DOM única para imágenes estáticas y GIFs: el orden del array define la profundidad.
 function updateDomImages() {
   if (!imageLayer) return;
   const used = new Set();
-  for (const img of WORLD.images || []) {
-    if (img.viewerVisible === false || img.visible === false) continue;
+  (WORLD.images || []).forEach((img, index) => {
+    if (img.viewerVisible === false || img.visible === false) return;
     let el = domImageMap.get(img.id);
     if (!el) {
       el = document.createElement('img');
       el.style.position = 'absolute';
       el.style.pointerEvents = 'none';
+      el.style.display = 'block';
+      el.style.maxWidth = 'none';
+      el.style.maxHeight = 'none';
+      el.style.objectFit = 'fill';
       el.crossOrigin = 'anonymous';
       el.src = img.url;
       imageLayer.appendChild(el);
@@ -397,9 +402,10 @@ function updateDomImages() {
     el.style.height = (img.height || 200) + 'px';
     el.style.transformOrigin = 'center center';
     el.style.transform = `rotate(${Number(img.rotation) || 0}deg) scaleX(${img.flipX ? -1 : 1})`;
+    el.style.zIndex = String(index);
     el.style.visibility = 'visible';
     used.add(img.id);
-  }
+  });
   // Limpia nodos obsoletos
   for (const [id, el] of domImageMap.entries()) {
     if (!used.has(id)) { try { el.remove(); } catch (e) {} domImageMap.delete(id); }

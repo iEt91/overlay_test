@@ -771,10 +771,8 @@ document.addEventListener('DOMContentLoaded', () => {
         syncStreamPreviewToCanvas();
         ctx.clearRect(0,0,canvas.width,canvas.height);
 
-        // draw non-GIF images on canvas
-        for (const img of STATE.images) {
-          if (!isGifUrl(img.url)) drawImageOnCanvas(img);
-        }
+        // Todas las imágenes (estáticas y GIFs) se muestran en la misma capa DOM.
+        // Así respetan un único orden: las primeras quedan atrás y las nuevas adelante.
 
         // Texto sobre las imágenes; pincel por encima de todo.
         for (const text of STATE.texts) drawText(text);
@@ -863,12 +861,12 @@ document.addEventListener('DOMContentLoaded', () => {
       } catch(e){}
     }
 
-    // DOM image overlays used for GIFs (and handled in same flow for simplicity)
+    // Una única capa DOM para imágenes estáticas y GIFs. El canvas queda arriba
+    // sólo para texto, trazos y controles de selección.
     function updateDomImages() {
       const used = new Set();
-      const rect = viewportWrap.getBoundingClientRect();
 
-      for (const img of STATE.images) {
+      STATE.images.forEach((img, index) => {
         // compute screen pos/size
         const screenPos = worldToScreen({ x: img.x, y: img.y });
         const sW = (img.width || 300) * transform.scale;
@@ -880,6 +878,10 @@ document.addEventListener('DOMContentLoaded', () => {
           el.style.position = 'absolute';
           el.style.pointerEvents = 'none'; // let canvas handle pointer events
           el.style.willChange = 'transform';
+          el.style.display = 'block';
+          el.style.maxWidth = 'none';
+          el.style.maxHeight = 'none';
+          el.style.objectFit = 'fill';
           el.crossOrigin = 'anonymous';
           el.src = img.url;
           imageLayer.appendChild(el);
@@ -893,9 +895,10 @@ document.addEventListener('DOMContentLoaded', () => {
         el.style.height = Math.max(1, Math.round(sH)) + 'px';
         el.style.transformOrigin = 'center center';
         el.style.transform = `rotate(${Number(img.rotation) || 0}deg) scaleX(${img.flipX ? -1 : 1})`;
+        el.style.zIndex = String(index);
         el.style.visibility = 'visible';
         used.add(img.id);
-      }
+      });
 
       // remove DOM nodes for images no longer present
       for (const [id, el] of domImageMap.entries()) {
