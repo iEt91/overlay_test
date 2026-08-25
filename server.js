@@ -9,6 +9,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { Readable } = require('stream');
 const cors = require('cors');
 const http = require('http');
 const session = require('express-session');
@@ -202,11 +203,33 @@ function emptyAssets() {
   return { images: [], audio: [] };
 }
 
+// Los emotes de 7TV se muestran a través de una ruta propia y limitada. Así el
+// editor y el Viewer no dependen de que el navegador acepte recursos de una
+// CDN externa ni de sus políticas CORS. No es un proxy abierto: sólo permite
+// IDs y variantes de archivo válidas de 7TV.
+const SEVEN_TV_EMOTE_FILE_RE = /^(?:1x|2x|3x|4x)\.(?:gif|webp|png|avif)$/i;
+const SEVEN_TV_EMOTE_URL_RE = /^https?:\/\/cdn\.7tv\.app\/emote\/([A-Za-z0-9_-]+)\/((?:1x|2x|3x|4x)\.(?:gif|webp|png|avif))(?:[?#].*)?$/i;
+
+function sevenTvProxyUrl(emoteId, fileName) {
+  return `/api/7tv/emote/${encodeURIComponent(emoteId)}/${encodeURIComponent(fileName.toLowerCase())}`;
+}
+
+function normalizeSevenTvImage(image) {
+  if (!image || typeof image !== 'object' || image.source !== '7tv' || typeof image.url !== 'string') return image;
+  const match = image.url.match(SEVEN_TV_EMOTE_URL_RE);
+  if (!match) return image;
+  return { ...image, url: sevenTvProxyUrl(match[1], match[2]) };
+}
+
+function normalizeImages(images) {
+  return Array.isArray(images) ? images.map(normalizeSevenTvImage) : images;
+}
+
 function normalizeSceneContent(incoming, fallback = emptySceneContent()) {
   const value = incoming && typeof incoming === 'object' ? incoming : {};
   return {
     strokes: Array.isArray(value.strokes) ? value.strokes : fallback.strokes,
-    images: Array.isArray(value.images) ? value.images : fallback.images,
+    images: Array.isArray(value.images) ? normalizeImages(value.images) : normalizeImages(fallback.images),
     texts: Array.isArray(value.texts) ? value.texts : fallback.texts,
     timers: Array.isArray(value.timers) ? value.timers : fallback.timers,
     audio: value.audio && typeof value.audio === 'object' ? value.audio : fallback.audio,
@@ -220,7 +243,7 @@ function normalizeSceneContent(incoming, fallback = emptySceneContent()) {
 function normalizeAssets(incoming, fallback = emptyAssets()) {
   const value = incoming && typeof incoming === 'object' ? incoming : {};
   return {
-    images: Array.isArray(value.images) ? value.images : fallback.images,
+    images: Array.isArray(value.images) ? normalizeImages(value.images) : normalizeImages(fallback.images),
     audio: Array.isArray(value.audio) ? value.audio : fallback.audio
   };
 }
@@ -987,6 +1010,35 @@ app.get('/viewer.html', (_req, res) => {
   res.status(404).send('Usá el enlace privado del Viewer generado para tu proyecto.');
 });
 
+// El Viewer se abre en OBS sin sesión, por eso esta ruta es pública. El destino
+// no puede ser elegido por el visitante: se valida cada parte y sólo se sirve
+// un archivo de emote desde la CDN oficial de 7TV.
+app.get('/api/7tv/emote/:emoteId/:fileName', async (req, res) => {
+  const emoteId = String(req.params.emoteId || '');
+  const fileName = String(req.params.fileName || '').toLowerCase();
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(emoteId) || !SEVEN_TV_EMOTE_FILE_RE.test(fileName)) {
+    return res.status(400).send('Emote de 7TV inválido.');
+  }
+
+  try {
+    const response = await fetch(`https://cdn.7tv.app/emote/${emoteId}/${fileName}`, {
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!response.ok || !response.body) return res.status(404).send('No se encontró el emote de 7TV.');
+    const contentType = response.headers.get('content-type') || (fileName.endsWith('.gif') ? 'image/gif' : 'image/webp');
+    res.set({
+      'Content-Type': contentType,
+      'Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800'
+    });
+    const length = response.headers.get('content-length');
+    if (length) res.set('Content-Length', length);
+    Readable.fromWeb(response.body).on('error', () => res.destroy()).pipe(res);
+  } catch (error) {
+    console.warn('No se pudo obtener un emote de 7TV:', error.message);
+    res.status(502).send('No se pudo cargar el emote de 7TV.');
+  }
+});
+
 // El resto de archivos visuales sigue siendo estático; ninguna clave sale del servidor.
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -1057,13 +1109,18 @@ app.get('/api/7tv/emotes', requireEditorApi, async (req, res) => {
       const preferredName = item.animated ? '4x.gif' : '4x.webp';
       const file = files.find(entry => entry.name === preferredName)
         || files.find(entry => entry.name === (item.animated ? '3x.gif' : '3x.webp'))
-        || files[files.length - 1];
+        // Sólo publicamos variantes que también acepta la ruta segura del
+        // emote. Si 7TV agregara un archivo auxiliar, no generamos un enlace
+        // que después quedaría vacío en el canvas.
+        || files.find(entry => SEVEN_TV_EMOTE_FILE_RE.test(String(entry?.name || '')));
       if (!item?.host?.url || !file?.name || !item?.name) return null;
       return {
         id: String(item.id),
         name: String(item.name).slice(0, 120),
         animated: Boolean(item.animated),
-        url: `https:${item.host.url}/${file.name}`,
+        // Usamos una ruta propia y validada para que los GIFs también se vean
+        // dentro del canvas y luego en el Viewer/OBS.
+        url: sevenTvProxyUrl(String(item.id), file.name),
         width: Number(file.width) || 256,
         height: Number(file.height) || 256
       };
@@ -1617,7 +1674,7 @@ wss.on('connection', (ws, req) => {
       // image/canvas events
       case 'image:add':
         if (data.payload) {
-          STATE.images.push(data.payload);
+          STATE.images.push(normalizeSevenTvImage(data.payload));
           STATE.updatedAt = Date.now();
         }
         // Una imagen afecta tanto al editor como al Viewer. Enviar el estado
@@ -1649,7 +1706,7 @@ wss.on('connection', (ws, req) => {
       // assets (biblioteca)
       case 'asset:image:add':
         if (data.payload) {
-          const incomingAsset = data.payload;
+          const incomingAsset = normalizeSevenTvImage(data.payload);
           const isDuplicateSevenTvAsset = incomingAsset.source === '7tv' && STATE.assets.images.some(asset =>
             asset.source === '7tv' && (asset.url === incomingAsset.url || (incomingAsset.sourceId && asset.sourceId === incomingAsset.sourceId))
           );

@@ -200,6 +200,11 @@ input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); ou
 .slot-assign.has-slot { color: #071817 !important; border-color: var(--accent) !important; background: var(--accent) !important; font-size: 11px !important; font-weight: 800; }
 .canvas-remove, .asset-delete { color: #ef9b9b !important; }
 .eye-toggle svg, .mirror-toggle svg, .canvas-remove svg, .asset-delete svg, .slot-assign svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+/* En Imágenes/GIFs, las dos acciones principales se distinguen de inmediato. */
+.asset-library-card .asset-delete { color: #101717 !important; border-color: #f06b6b !important; background: #f06b6b !important; }
+.asset-library-card .emote-add { color: #101717 !important; border-color: #49d486 !important; background: #49d486 !important; }
+.asset-library-card .asset-delete:hover { border-color: #ff8c8c !important; background: #ff8c8c !important; }
+.asset-library-card .emote-add:hover { border-color: #76e7a6 !important; background: #76e7a6 !important; }
 .slot-popover { position: fixed; z-index: 1000; display: grid; grid-template-columns: repeat(5, 30px); gap: 5px; padding: 7px; border: 1px solid #526666; border-radius: 7px; background: #162021; box-shadow: 0 14px 32px rgba(0,0,0,.52); }
 .slot-popover button { display: grid; place-items: center; width: 30px; min-width: 30px; height: 28px; min-height: 28px; margin: 0; padding: 0; border: 1px solid #3b4a4b; border-radius: 4px; background: #1d292a; color: #dce7e5; font-size: 11px; }
 .slot-popover button:hover { border-color: var(--accent); background: var(--accent-soft); color: #edffff; }
