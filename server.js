@@ -48,6 +48,8 @@ const TANGO_BOT_CHANNEL_SCOPES = [
   'moderator:manage:suspicious_users', 'moderator:manage:unban_requests', 'moderator:manage:warnings',
   'moderator:read:chatters', 'moderator:read:followers', 'moderator:read:moderators'
 ];
+const TANGO_BOT_DELAY_PRESETS = new Set([0, 10, 25, 30, 45, 60, 70]);
+const tangoBotDelayAnnouncements = new Map();
 
 // La clave de sesión debe existir únicamente en .env. Nunca se envía al navegador.
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -222,6 +224,44 @@ function encryptBotToken(token) {
   const ciphertext = Buffer.concat([cipher.update(String(token), 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
   return `${iv.toString('base64url')}.${tag.toString('base64url')}.${ciphertext.toString('base64url')}`;
+}
+
+function decryptBotToken(value) {
+  const key = botEncryptionKey();
+  const [ivValue, tagValue, ciphertextValue] = String(value || '').split('.');
+  if (!key || !ivValue || !tagValue || !ciphertextValue) throw new Error('El token del bot no se puede descifrar.');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivValue, 'base64url'));
+  decipher.setAuthTag(Buffer.from(tagValue, 'base64url'));
+  return Buffer.concat([decipher.update(Buffer.from(ciphertextValue, 'base64url')), decipher.final()]).toString('utf8');
+}
+
+async function getTangoBotAccessToken(bot) {
+  const tokenExpiresAt = Date.parse(bot.token_expires_at || '');
+  if (!Number.isFinite(tokenExpiresAt) || tokenExpiresAt - Date.now() > 60_000) {
+    return decryptBotToken(bot.access_token_ciphertext);
+  }
+
+  const refreshToken = decryptBotToken(bot.refresh_token_ciphertext);
+  const response = await fetch('https://id.twitch.tv/oauth2/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: TANGO_BOT_TWITCH_CLIENT_ID,
+      client_secret: TANGO_BOT_TWITCH_CLIENT_SECRET,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken
+    })
+  });
+  const tokens = await response.json();
+  if (!response.ok || !tokens.access_token || !tokens.refresh_token) throw new Error('Twitch no pudo renovar el token del bot.');
+
+  const updateResult = await supabaseAdmin.from('twitch_bot_installations').update({
+    access_token_ciphertext: encryptBotToken(tokens.access_token),
+    refresh_token_ciphertext: encryptBotToken(tokens.refresh_token),
+    token_expires_at: new Date(Date.now() + Number(tokens.expires_in || 0) * 1000).toISOString()
+  }).eq('singleton', true);
+  if (updateResult.error) throw new Error('No se pudo guardar el token renovado del bot.');
+  return tokens.access_token;
 }
 
 function twitchConfigurationError(res) {
@@ -1030,6 +1070,66 @@ app.get('/api/tango-bot/status', async (req, res) => {
     channel,
     message: channel?.authorized ? `Tango GG Bot está autorizado para @${channel.login}.` : 'Tango GG Bot está listo. Autorizá este canal para usarlo.'
   });
+});
+
+app.post('/api/tango-bot/delay', async (req, res) => {
+  if (!tangoBotIsConfigured()) return res.status(503).json({ ok: false, message: 'Falta configurar el bot de Tango GG en el servidor.' });
+
+  const broadcasterId = String(req.body?.channelId || '').trim();
+  const delaySeconds = Number(req.body?.delaySeconds);
+  if (!/^\d+$/.test(broadcasterId) || !Number.isInteger(delaySeconds) || !TANGO_BOT_DELAY_PRESETS.has(delaySeconds)) {
+    return res.status(400).json({ ok: false, message: 'El canal o el delay no son válidos.' });
+  }
+
+  const lastAnnouncementAt = tangoBotDelayAnnouncements.get(broadcasterId) || 0;
+  if (Date.now() - lastAnnouncementAt < 3_000) return res.json({ ok: true, skipped: true });
+
+  try {
+    const [botResult, channelResult] = await Promise.all([
+      supabaseAdmin.from('twitch_bot_installations')
+        .select('twitch_id, access_token_ciphertext, refresh_token_ciphertext, token_expires_at')
+        .eq('singleton', true)
+        .maybeSingle(),
+      supabaseAdmin.from('twitch_bot_channel_authorizations')
+        .select('broadcaster_id')
+        .eq('broadcaster_id', broadcasterId)
+        .maybeSingle()
+    ]);
+    if (botResult.error || !botResult.data) {
+      console.error('Tango bot delay status read failed:', botResult.error?.message || 'Bot no conectado.');
+      return res.status(503).json({ ok: false, message: 'No se pudo leer la conexión del bot.' });
+    }
+    if (channelResult.error || !channelResult.data) {
+      console.error('Tango bot delay channel read failed:', channelResult.error?.message || 'Canal no autorizado.');
+      return res.status(403).json({ ok: false, message: 'El bot no está autorizado para este canal.' });
+    }
+
+    const accessToken = await getTangoBotAccessToken(botResult.data);
+    const twitchResponse = await fetch('https://api.twitch.tv/helix/chat/messages', {
+      method: 'POST',
+      headers: {
+        'Client-Id': TANGO_BOT_TWITCH_CLIENT_ID,
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        broadcaster_id: broadcasterId,
+        sender_id: String(botResult.data.twitch_id),
+        message: delaySeconds === 0 ? '⏱ El stream está sin delay.' : `⏱ Delay actual: ${delaySeconds} segundos.`
+      })
+    });
+    const payload = await twitchResponse.json();
+    if (!twitchResponse.ok || !payload?.data?.[0]?.is_sent) {
+      console.error('Tango bot delay chat send failed:', payload?.message || payload?.data?.[0]?.drop_reason?.message || twitchResponse.status);
+      return res.status(502).json({ ok: false, message: 'Twitch no pudo enviar el aviso del delay.' });
+    }
+
+    tangoBotDelayAnnouncements.set(broadcasterId, Date.now());
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Tango bot delay announcement failed:', error.message);
+    res.status(503).json({ ok: false, message: 'No se pudo anunciar el delay con el bot.' });
+  }
 });
 
 app.get('/api/auth/me', (req, res) => {
