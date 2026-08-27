@@ -27,6 +27,8 @@ const TANGO_BOT_TWITCH_REDIRECT_URI = process.env.TANGO_BOT_TWITCH_REDIRECT_URI 
 const TANGO_BOT_TOKEN_ENCRYPTION_KEY = process.env.TANGO_BOT_TOKEN_ENCRYPTION_KEY;
 const TANGO_BOT_EVENTSUB_SECRET = process.env.TANGO_BOT_EVENTSUB_SECRET;
 const TANGO_BOT_TWITCH_LOGIN = (process.env.TANGO_BOT_TWITCH_LOGIN || 'tangov91_gg').trim().toLowerCase();
+let tangoBotAppAccessToken = null;
+let tangoBotAppAccessTokenExpiresAt = 0;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET?.trim();
@@ -283,6 +285,30 @@ async function getTangoBotAccessToken(bot) {
   return tokens.access_token;
 }
 
+async function getTangoBotAppAccessToken() {
+  if (tangoBotAppAccessToken && tangoBotAppAccessTokenExpiresAt - Date.now() > 60_000) {
+    return tangoBotAppAccessToken;
+  }
+
+  const response = await fetch('https://id.twitch.tv/oauth2/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: TANGO_BOT_TWITCH_CLIENT_ID,
+      client_secret: TANGO_BOT_TWITCH_CLIENT_SECRET,
+      grant_type: 'client_credentials'
+    })
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.access_token) {
+    throw new Error(payload?.message || 'Twitch no pudo crear el token de aplicación del bot.');
+  }
+
+  tangoBotAppAccessToken = payload.access_token;
+  tangoBotAppAccessTokenExpiresAt = Date.now() + Number(payload.expires_in || 0) * 1000;
+  return tangoBotAppAccessToken;
+}
+
 async function getTangoBotInstallation() {
   const result = await supabaseAdmin.from('twitch_bot_installations')
     .select('twitch_id, access_token_ciphertext, refresh_token_ciphertext, token_expires_at')
@@ -333,12 +359,12 @@ async function setTangoBotChannelDelay(broadcasterId, delaySeconds) {
 async function subscribeTangoBotToChannel(broadcasterId) {
   if (!tangoBotChatIsConfigured()) return false;
   const bot = await getTangoBotInstallation();
-  const accessToken = await getTangoBotAccessToken(bot);
+  const appAccessToken = await getTangoBotAppAccessToken();
   const response = await fetch('https://api.twitch.tv/helix/eventsub/subscriptions', {
     method: 'POST',
     headers: {
       'Client-Id': TANGO_BOT_TWITCH_CLIENT_ID,
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${appAccessToken}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
