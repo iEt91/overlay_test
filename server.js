@@ -40,6 +40,14 @@ const TANGO_BOT_SCOPES = [
   'moderator:manage:suspicious_users', 'moderator:manage:unban_requests', 'moderator:manage:warnings',
   'moderator:read:chatters', 'moderator:read:followers', 'moderator:read:moderators'
 ];
+const TANGO_BOT_CHANNEL_SCOPES = [
+  'channel:bot', 'channel:manage:broadcast', 'channel:manage:moderators',
+  'moderator:manage:announcements', 'moderator:manage:automod', 'moderator:manage:automod_settings',
+  'moderator:manage:banned_users', 'moderator:manage:blocked_terms', 'moderator:manage:chat_messages',
+  'moderator:manage:chat_settings', 'moderator:manage:shoutouts', 'moderator:manage:shield_mode',
+  'moderator:manage:suspicious_users', 'moderator:manage:unban_requests', 'moderator:manage:warnings',
+  'moderator:read:chatters', 'moderator:read:followers', 'moderator:read:moderators'
+];
 
 // La clave de sesión debe existir únicamente en .env. Nunca se envía al navegador.
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -867,6 +875,7 @@ app.get('/auth/twitch/bot', (req, res) => {
 
   const state = crypto.randomBytes(32).toString('hex');
   req.session.twitchBotOAuthState = state;
+  req.session.twitchBotOAuthMode = 'bot';
   const authorizationUrl = new URL('https://id.twitch.tv/oauth2/authorize');
   authorizationUrl.searchParams.set('client_id', TANGO_BOT_TWITCH_CLIENT_ID);
   authorizationUrl.searchParams.set('redirect_uri', TANGO_BOT_TWITCH_REDIRECT_URI);
@@ -879,6 +888,24 @@ app.get('/auth/twitch/bot', (req, res) => {
   });
 });
 
+// El streamer autoriza su propio canal; nunca se le pide la cuenta del bot.
+app.get('/auth/twitch/bot/channel', (req, res) => {
+  if (!tangoBotIsConfigured()) return res.status(503).send('Falta configurar el bot de Tango GG en el servidor.');
+  const state = crypto.randomBytes(32).toString('hex');
+  req.session.twitchBotOAuthState = state;
+  req.session.twitchBotOAuthMode = 'channel';
+  const authorizationUrl = new URL('https://id.twitch.tv/oauth2/authorize');
+  authorizationUrl.searchParams.set('client_id', TANGO_BOT_TWITCH_CLIENT_ID);
+  authorizationUrl.searchParams.set('redirect_uri', TANGO_BOT_TWITCH_REDIRECT_URI);
+  authorizationUrl.searchParams.set('response_type', 'code');
+  authorizationUrl.searchParams.set('scope', TANGO_BOT_CHANNEL_SCOPES.join(' '));
+  authorizationUrl.searchParams.set('state', state);
+  req.session.save((saveError) => {
+    if (saveError) return res.status(500).send('No se pudo preparar la autorización del canal. Volvé a intentarlo.');
+    res.redirect(authorizationUrl.toString());
+  });
+});
+
 app.get('/auth/twitch/bot/callback', async (req, res) => {
   if (!tangoBotIsConfigured()) return res.status(503).send('Falta configurar el bot de Tango GG en el servidor.');
   const { code, state, error, error_description: errorDescription } = req.query;
@@ -887,6 +914,7 @@ app.get('/auth/twitch/bot/callback', async (req, res) => {
     return res.status(400).send('No se pudo validar la autorización del bot. Volvé a intentarlo.');
   }
 
+  const mode = req.session.twitchBotOAuthMode || 'bot';
   try {
     const tokenResponse = await fetch('https://id.twitch.tv/oauth2/token', {
       method: 'POST',
@@ -914,39 +942,55 @@ app.get('/auth/twitch/bot/callback', async (req, res) => {
       console.error('Tango bot user lookup failed:', userPayload);
       return res.status(502).send('No se pudo identificar la cuenta del bot. Volvé a intentarlo.');
     }
-    if (user.login.toLowerCase() !== TANGO_BOT_TWITCH_LOGIN) {
-      return res.status(403).send(`Iniciá sesión con la cuenta del bot @${TANGO_BOT_TWITCH_LOGIN}, no con una cuenta de streamer.`);
-    }
-
     const expiresAt = Number.isFinite(Number(tokens.expires_in))
       ? new Date(Date.now() + Number(tokens.expires_in) * 1000).toISOString()
       : null;
-    const saveResult = await supabaseAdmin.from('twitch_bot_installations').upsert({
-      singleton: true,
-      twitch_id: user.id,
-      login: user.login,
-      display_name: user.display_name,
-      profile_image_url: user.profile_image_url || null,
-      access_token_ciphertext: encryptBotToken(tokens.access_token),
-      refresh_token_ciphertext: encryptBotToken(tokens.refresh_token),
-      token_expires_at: expiresAt,
-      scopes: Array.isArray(tokens.scope) ? tokens.scope : TANGO_BOT_SCOPES,
-      connected_at: new Date().toISOString()
-    }, { onConflict: 'singleton' });
+    let saveResult;
+    if (mode === 'channel') {
+      if (user.login.toLowerCase() === TANGO_BOT_TWITCH_LOGIN) return res.status(403).send('Para autorizar un canal, iniciá sesión con la cuenta del streamer, no con la cuenta del bot.');
+      saveResult = await supabaseAdmin.from('twitch_bot_channel_authorizations').upsert({
+        broadcaster_id: user.id,
+        login: user.login,
+        display_name: user.display_name,
+        profile_image_url: user.profile_image_url || null,
+        access_token_ciphertext: encryptBotToken(tokens.access_token),
+        refresh_token_ciphertext: encryptBotToken(tokens.refresh_token),
+        token_expires_at: expiresAt,
+        scopes: Array.isArray(tokens.scope) ? tokens.scope : TANGO_BOT_CHANNEL_SCOPES,
+        authorized_at: new Date().toISOString()
+      }, { onConflict: 'broadcaster_id' });
+    } else {
+      if (user.login.toLowerCase() !== TANGO_BOT_TWITCH_LOGIN) return res.status(403).send(`Iniciá sesión con la cuenta del bot @${TANGO_BOT_TWITCH_LOGIN}, no con una cuenta de streamer.`);
+      saveResult = await supabaseAdmin.from('twitch_bot_installations').upsert({
+        singleton: true,
+        twitch_id: user.id,
+        login: user.login,
+        display_name: user.display_name,
+        profile_image_url: user.profile_image_url || null,
+        access_token_ciphertext: encryptBotToken(tokens.access_token),
+        refresh_token_ciphertext: encryptBotToken(tokens.refresh_token),
+        token_expires_at: expiresAt,
+        scopes: Array.isArray(tokens.scope) ? tokens.scope : TANGO_BOT_SCOPES,
+        connected_at: new Date().toISOString()
+      }, { onConflict: 'singleton' });
+    }
     if (saveResult.error) {
-      console.error('Tango bot installation save failed:', saveResult.error.message);
-      return res.status(503).send('No se pudo guardar la autorización del bot. Confirmá que la migración de Tango GG esté aplicada.');
+      console.error('Tango bot authorization save failed:', saveResult.error.message);
+      return res.status(503).send('No se pudo guardar la autorización. Confirmá que la migración de Tango GG esté aplicada.');
     }
 
     delete req.session.twitchBotOAuthState;
-    req.session.save(() => res.type('html').send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Tango GG Bot</title></head><body><h1>Bot conectado</h1><p>Podés volver a Tango Companion.</p><script>window.close()</script></body></html>`));
+    delete req.session.twitchBotOAuthMode;
+    const title = mode === 'channel' ? 'Canal autorizado' : 'Bot conectado';
+    const message = mode === 'channel' ? 'Tango GG Bot ya puede operar en este canal. Volvé a Tango Companion y actualizá el estado.' : 'La cuenta oficial del bot fue conectada. Podés volver a Tango Companion.';
+    req.session.save(() => res.type('html').send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title} · Tango GG</title><style>body{margin:0;background:#020b09;color:#edfdf8;font:16px system-ui,sans-serif;display:grid;min-height:100vh;place-items:center}.card{max-width:440px;padding:36px;border:1px solid #1c6154;border-radius:18px;background:#06231d;box-shadow:0 16px 60px #0008}p{color:#a9d7cb;line-height:1.55}.mark{color:#50efd7;font-weight:800;letter-spacing:.12em;font-size:12px}</style></head><body><main class="card"><p class="mark">TANGO GG BOT</p><h1>${title}</h1><p>${message}</p></main></body></html>`));
   } catch (error) {
     console.error('Tango bot OAuth callback error:', error.message);
     res.status(500).send('Ocurrió un error al conectar el bot. Volvé a intentarlo.');
   }
 });
 
-app.get('/api/tango-bot/status', async (_req, res) => {
+app.get('/api/tango-bot/status', async (req, res) => {
   if (!tangoBotIsConfigured()) {
     return res.json({ configured: false, connected: false, message: 'Falta configurar el bot de Tango GG en el servidor.' });
   }
@@ -959,6 +1003,21 @@ app.get('/api/tango-bot/status', async (_req, res) => {
     return res.status(503).json({ configured: true, connected: false, message: 'No se pudo leer el estado del bot.' });
   }
   if (!result.data) return res.json({ configured: true, connected: false, message: 'El bot todavía no está conectado.' });
+  const broadcasterId = String(req.query.channelId || '').trim();
+  let channel = null;
+  if (/^\d+$/.test(broadcasterId)) {
+    const channelResult = await supabaseAdmin.from('twitch_bot_channel_authorizations')
+      .select('broadcaster_id, login, display_name, authorized_at')
+      .eq('broadcaster_id', broadcasterId)
+      .maybeSingle();
+    if (channelResult.error) {
+      console.error('Tango bot channel status read failed:', channelResult.error.message);
+      return res.status(503).json({ configured: true, connected: true, message: 'No se pudo leer la autorización del canal.' });
+    }
+    channel = channelResult.data
+      ? { authorized: true, login: channelResult.data.login, displayName: channelResult.data.display_name, authorizedAt: channelResult.data.authorized_at }
+      : { authorized: false };
+  }
   res.json({
     configured: true,
     connected: true,
@@ -968,7 +1027,8 @@ app.get('/api/tango-bot/status', async (_req, res) => {
       connectedAt: result.data.connected_at,
       scopes: result.data.scopes || []
     },
-    message: `@${result.data.login} está conectado.`
+    channel,
+    message: channel?.authorized ? `Tango GG Bot está autorizado para @${channel.login}.` : 'Tango GG Bot está listo. Autorizá este canal para usarlo.'
   });
 });
 
