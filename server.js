@@ -21,12 +21,25 @@ const PORT = process.env.PORT || 3000;
 const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID;
 const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
 const TWITCH_REDIRECT_URI = process.env.TWITCH_REDIRECT_URI || `http://localhost:${PORT}/auth/twitch/callback`;
+const TANGO_BOT_TWITCH_CLIENT_ID = process.env.TANGO_BOT_TWITCH_CLIENT_ID;
+const TANGO_BOT_TWITCH_CLIENT_SECRET = process.env.TANGO_BOT_TWITCH_CLIENT_SECRET;
+const TANGO_BOT_TWITCH_REDIRECT_URI = process.env.TANGO_BOT_TWITCH_REDIRECT_URI || `http://localhost:${PORT}/auth/twitch/bot/callback`;
+const TANGO_BOT_TOKEN_ENCRYPTION_KEY = process.env.TANGO_BOT_TOKEN_ENCRYPTION_KEY;
+const TANGO_BOT_TWITCH_LOGIN = (process.env.TANGO_BOT_TWITCH_LOGIN || 'tangov91_gg').trim().toLowerCase();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET?.trim();
 // Durante la beta el acceso no vence automáticamente. Cuando haya planes pagos,
 // se activa explícitamente en el host con ENFORCE_SUBSCRIPTIONS=true.
 const ENFORCE_SUBSCRIPTIONS = process.env.ENFORCE_SUBSCRIPTIONS === 'true';
+const TANGO_BOT_SCOPES = [
+  'user:read:chat', 'user:write:chat', 'user:bot',
+  'moderator:manage:announcements', 'moderator:manage:automod', 'moderator:manage:automod_settings',
+  'moderator:manage:banned_users', 'moderator:manage:blocked_terms', 'moderator:manage:chat_messages',
+  'moderator:manage:chat_settings', 'moderator:manage:shoutouts', 'moderator:manage:shield_mode',
+  'moderator:manage:suspicious_users', 'moderator:manage:unban_requests', 'moderator:manage:warnings',
+  'moderator:read:chatters', 'moderator:read:followers', 'moderator:read:moderators'
+];
 
 // La clave de sesión debe existir únicamente en .env. Nunca se envía al navegador.
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -175,6 +188,32 @@ app.use(sessionMiddleware);
 
 function twitchIsConfigured() {
   return Boolean(TWITCH_CLIENT_ID && TWITCH_CLIENT_SECRET && SESSION_SECRET && supabaseAdmin);
+}
+
+function botEncryptionKey() {
+  if (!/^[0-9a-f]{64}$/i.test(TANGO_BOT_TOKEN_ENCRYPTION_KEY || '')) return null;
+  return Buffer.from(TANGO_BOT_TOKEN_ENCRYPTION_KEY, 'hex');
+}
+
+function tangoBotIsConfigured() {
+  return Boolean(
+    TANGO_BOT_TWITCH_CLIENT_ID &&
+    TANGO_BOT_TWITCH_CLIENT_SECRET &&
+    TANGO_BOT_TWITCH_REDIRECT_URI &&
+    SESSION_SECRET &&
+    supabaseAdmin &&
+    botEncryptionKey()
+  );
+}
+
+function encryptBotToken(token) {
+  const key = botEncryptionKey();
+  if (!key) throw new Error('La clave de cifrado del bot no tiene un formato válido.');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ciphertext = Buffer.concat([cipher.update(String(token), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString('base64url')}.${tag.toString('base64url')}.${ciphertext.toString('base64url')}`;
 }
 
 function twitchConfigurationError(res) {
@@ -819,6 +858,118 @@ app.get('/auth/twitch/callback', async (req, res) => {
     console.error('Twitch OAuth callback error:', error);
     res.status(500).send('Ocurrió un error al conectar con Twitch. Volvé a intentarlo.');
   }
+});
+
+// El bot se autoriza una única vez con su propia cuenta. Sus tokens quedan
+// cifrados en Supabase y no se mezclan con la sesión del streamer.
+app.get('/auth/twitch/bot', (req, res) => {
+  if (!tangoBotIsConfigured()) return res.status(503).send('Falta configurar el bot de Tango GG en el servidor.');
+
+  const state = crypto.randomBytes(32).toString('hex');
+  req.session.twitchBotOAuthState = state;
+  const authorizationUrl = new URL('https://id.twitch.tv/oauth2/authorize');
+  authorizationUrl.searchParams.set('client_id', TANGO_BOT_TWITCH_CLIENT_ID);
+  authorizationUrl.searchParams.set('redirect_uri', TANGO_BOT_TWITCH_REDIRECT_URI);
+  authorizationUrl.searchParams.set('response_type', 'code');
+  authorizationUrl.searchParams.set('scope', TANGO_BOT_SCOPES.join(' '));
+  authorizationUrl.searchParams.set('state', state);
+  req.session.save((saveError) => {
+    if (saveError) return res.status(500).send('No se pudo preparar la autorización del bot. Volvé a intentarlo.');
+    res.redirect(authorizationUrl.toString());
+  });
+});
+
+app.get('/auth/twitch/bot/callback', async (req, res) => {
+  if (!tangoBotIsConfigured()) return res.status(503).send('Falta configurar el bot de Tango GG en el servidor.');
+  const { code, state, error, error_description: errorDescription } = req.query;
+  if (error) return res.status(400).send(`Twitch canceló la autorización del bot: ${errorDescription || error}`);
+  if (!code || !state || state !== req.session.twitchBotOAuthState) {
+    return res.status(400).send('No se pudo validar la autorización del bot. Volvé a intentarlo.');
+  }
+
+  try {
+    const tokenResponse = await fetch('https://id.twitch.tv/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: TANGO_BOT_TWITCH_CLIENT_ID,
+        client_secret: TANGO_BOT_TWITCH_CLIENT_SECRET,
+        code: String(code),
+        grant_type: 'authorization_code',
+        redirect_uri: TANGO_BOT_TWITCH_REDIRECT_URI
+      })
+    });
+    const tokens = await tokenResponse.json();
+    if (!tokenResponse.ok || !tokens.access_token || !tokens.refresh_token) {
+      console.error('Tango bot token exchange failed:', tokens);
+      return res.status(502).send('Twitch no pudo completar la autorización del bot. Volvé a intentarlo.');
+    }
+
+    const userResponse = await fetch('https://api.twitch.tv/helix/users', {
+      headers: { 'Client-Id': TANGO_BOT_TWITCH_CLIENT_ID, Authorization: `Bearer ${tokens.access_token}` }
+    });
+    const userPayload = await userResponse.json();
+    const user = userPayload?.data?.[0];
+    if (!userResponse.ok || !user) {
+      console.error('Tango bot user lookup failed:', userPayload);
+      return res.status(502).send('No se pudo identificar la cuenta del bot. Volvé a intentarlo.');
+    }
+    if (user.login.toLowerCase() !== TANGO_BOT_TWITCH_LOGIN) {
+      return res.status(403).send(`Iniciá sesión con la cuenta del bot @${TANGO_BOT_TWITCH_LOGIN}, no con una cuenta de streamer.`);
+    }
+
+    const expiresAt = Number.isFinite(Number(tokens.expires_in))
+      ? new Date(Date.now() + Number(tokens.expires_in) * 1000).toISOString()
+      : null;
+    const saveResult = await supabaseAdmin.from('twitch_bot_installations').upsert({
+      singleton: true,
+      twitch_id: user.id,
+      login: user.login,
+      display_name: user.display_name,
+      profile_image_url: user.profile_image_url || null,
+      access_token_ciphertext: encryptBotToken(tokens.access_token),
+      refresh_token_ciphertext: encryptBotToken(tokens.refresh_token),
+      token_expires_at: expiresAt,
+      scopes: Array.isArray(tokens.scope) ? tokens.scope : TANGO_BOT_SCOPES,
+      connected_at: new Date().toISOString()
+    }, { onConflict: 'singleton' });
+    if (saveResult.error) {
+      console.error('Tango bot installation save failed:', saveResult.error.message);
+      return res.status(503).send('No se pudo guardar la autorización del bot. Confirmá que la migración de Tango GG esté aplicada.');
+    }
+
+    delete req.session.twitchBotOAuthState;
+    req.session.save(() => res.type('html').send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Tango GG Bot</title></head><body><h1>Bot conectado</h1><p>Podés volver a Tango Companion.</p><script>window.close()</script></body></html>`));
+  } catch (error) {
+    console.error('Tango bot OAuth callback error:', error.message);
+    res.status(500).send('Ocurrió un error al conectar el bot. Volvé a intentarlo.');
+  }
+});
+
+app.get('/api/tango-bot/status', async (_req, res) => {
+  if (!tangoBotIsConfigured()) {
+    return res.json({ configured: false, connected: false, message: 'Falta configurar el bot de Tango GG en el servidor.' });
+  }
+  const result = await supabaseAdmin.from('twitch_bot_installations')
+    .select('login, display_name, token_expires_at, scopes, connected_at')
+    .eq('singleton', true)
+    .maybeSingle();
+  if (result.error) {
+    console.error('Tango bot status read failed:', result.error.message);
+    return res.status(503).json({ configured: true, connected: false, message: 'No se pudo leer el estado del bot.' });
+  }
+  if (!result.data) return res.json({ configured: true, connected: false, message: 'El bot todavía no está conectado.' });
+  res.json({
+    configured: true,
+    connected: true,
+    bot: {
+      login: result.data.login,
+      displayName: result.data.display_name,
+      connectedAt: result.data.connected_at,
+      scopes: result.data.scopes || []
+    },
+    message: `@${result.data.login} está conectado.`
+  });
 });
 
 app.get('/api/auth/me', (req, res) => {
