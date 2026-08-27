@@ -25,6 +25,7 @@ const TANGO_BOT_TWITCH_CLIENT_ID = process.env.TANGO_BOT_TWITCH_CLIENT_ID;
 const TANGO_BOT_TWITCH_CLIENT_SECRET = process.env.TANGO_BOT_TWITCH_CLIENT_SECRET;
 const TANGO_BOT_TWITCH_REDIRECT_URI = process.env.TANGO_BOT_TWITCH_REDIRECT_URI || `http://localhost:${PORT}/auth/twitch/bot/callback`;
 const TANGO_BOT_TOKEN_ENCRYPTION_KEY = process.env.TANGO_BOT_TOKEN_ENCRYPTION_KEY;
+const TANGO_BOT_EVENTSUB_SECRET = process.env.TANGO_BOT_EVENTSUB_SECRET;
 const TANGO_BOT_TWITCH_LOGIN = (process.env.TANGO_BOT_TWITCH_LOGIN || 'tangov91_gg').trim().toLowerCase();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
@@ -50,6 +51,8 @@ const TANGO_BOT_CHANNEL_SCOPES = [
 ];
 const TANGO_BOT_DELAY_PRESETS = new Set([0, 10, 25, 30, 45, 60, 70]);
 const tangoBotDelayAnnouncements = new Map();
+const tangoBotEventSubMessageIds = new Map();
+const TANGO_BOT_EVENTSUB_MESSAGE_TTL_MS = 10 * 60 * 1000;
 
 // La clave de sesión debe existir únicamente en .env. Nunca se envía al navegador.
 const SESSION_SECRET = process.env.SESSION_SECRET;
@@ -173,7 +176,12 @@ const imageUpload = createUpload('image');
 const audioUpload = createUpload('audio');
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({
+  limit: '50mb',
+  verify: (req, _res, buffer) => {
+    if (req.originalUrl?.split('?')[0] === '/webhooks/twitch/eventsub') req.twitchEventSubRawBody = Buffer.from(buffer);
+  }
+}));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.set('trust proxy', 1);
 
@@ -214,6 +222,17 @@ function tangoBotIsConfigured() {
     supabaseAdmin &&
     botEncryptionKey()
   );
+}
+
+function tangoBotChatIsConfigured() {
+  return tangoBotIsConfigured() && typeof TANGO_BOT_EVENTSUB_SECRET === 'string' && TANGO_BOT_EVENTSUB_SECRET.length >= 32;
+}
+
+function tangoBotEventSubCallbackUrl() {
+  const callbackUrl = new URL(TANGO_BOT_TWITCH_REDIRECT_URI);
+  callbackUrl.pathname = '/webhooks/twitch/eventsub';
+  callbackUrl.search = '';
+  return callbackUrl.toString();
 }
 
 function encryptBotToken(token) {
@@ -262,6 +281,152 @@ async function getTangoBotAccessToken(bot) {
   }).eq('singleton', true);
   if (updateResult.error) throw new Error('No se pudo guardar el token renovado del bot.');
   return tokens.access_token;
+}
+
+async function getTangoBotInstallation() {
+  const result = await supabaseAdmin.from('twitch_bot_installations')
+    .select('twitch_id, access_token_ciphertext, refresh_token_ciphertext, token_expires_at')
+    .eq('singleton', true)
+    .maybeSingle();
+  if (result.error || !result.data) throw new Error(result.error?.message || 'El bot no está conectado.');
+  return result.data;
+}
+
+async function sendTangoBotChatMessage(broadcasterId, message) {
+  const bot = await getTangoBotInstallation();
+  const accessToken = await getTangoBotAccessToken(bot);
+  const response = await fetch('https://api.twitch.tv/helix/chat/messages', {
+    method: 'POST',
+    headers: {
+      'Client-Id': TANGO_BOT_TWITCH_CLIENT_ID,
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      broadcaster_id: broadcasterId,
+      sender_id: String(bot.twitch_id),
+      message
+    })
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload?.data?.[0]?.is_sent) {
+    throw new Error(payload?.message || payload?.data?.[0]?.drop_reason?.message || `Twitch rechazó el mensaje (${response.status}).`);
+  }
+}
+
+async function ensureTangoBotChannelDefaults(broadcasterId) {
+  const [stateResult, commandResult] = await Promise.all([
+    supabaseAdmin.from('twitch_bot_channel_state').upsert({ broadcaster_id: broadcasterId }, { onConflict: 'broadcaster_id', ignoreDuplicates: true }),
+    supabaseAdmin.from('twitch_bot_commands').upsert({ broadcaster_id: broadcasterId, command_name: '!delay', response_type: 'delay' }, { onConflict: 'broadcaster_id,command_name', ignoreDuplicates: true })
+  ]);
+  if (stateResult.error || commandResult.error) throw new Error(stateResult.error?.message || commandResult.error?.message || 'No se pudo preparar los comandos del canal.');
+}
+
+async function setTangoBotChannelDelay(broadcasterId, delaySeconds) {
+  const result = await supabaseAdmin.from('twitch_bot_channel_state').upsert({
+    broadcaster_id: broadcasterId,
+    delay_seconds: delaySeconds
+  }, { onConflict: 'broadcaster_id' });
+  if (result.error) throw new Error(result.error.message);
+}
+
+async function subscribeTangoBotToChannel(broadcasterId) {
+  if (!tangoBotChatIsConfigured()) return false;
+  const bot = await getTangoBotInstallation();
+  const accessToken = await getTangoBotAccessToken(bot);
+  const response = await fetch('https://api.twitch.tv/helix/eventsub/subscriptions', {
+    method: 'POST',
+    headers: {
+      'Client-Id': TANGO_BOT_TWITCH_CLIENT_ID,
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      type: 'channel.chat.message',
+      version: '1',
+      condition: { broadcaster_user_id: broadcasterId, user_id: String(bot.twitch_id) },
+      transport: { method: 'webhook', callback: tangoBotEventSubCallbackUrl(), secret: TANGO_BOT_EVENTSUB_SECRET }
+    })
+  });
+  if (response.status === 409) return true;
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.message || `Twitch no pudo registrar el chat (${response.status}).`);
+  return true;
+}
+
+async function subscribeTangoBotToAuthorizedChannels() {
+  if (!tangoBotChatIsConfigured()) {
+    console.warn('Tango bot chat commands disabled: falta TANGO_BOT_EVENTSUB_SECRET.');
+    return;
+  }
+  const channelsResult = await supabaseAdmin.from('twitch_bot_channel_authorizations').select('broadcaster_id');
+  if (channelsResult.error) throw new Error(channelsResult.error.message);
+  for (const channel of channelsResult.data || []) {
+    try {
+      await subscribeTangoBotToChannel(channel.broadcaster_id);
+    } catch (error) {
+      console.error(`Tango bot chat subscription failed for ${channel.broadcaster_id}:`, error.message);
+    }
+  }
+}
+
+function isValidTangoBotEventSubRequest(req) {
+  const messageId = req.get('Twitch-Eventsub-Message-Id');
+  const timestamp = req.get('Twitch-Eventsub-Message-Timestamp');
+  const signature = req.get('Twitch-Eventsub-Message-Signature');
+  const timestampMs = Date.parse(timestamp || '');
+  if (!tangoBotChatIsConfigured() || !messageId || !timestamp || !signature || !Number.isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > TANGO_BOT_EVENTSUB_MESSAGE_TTL_MS) return false;
+
+  const body = req.twitchEventSubRawBody?.toString('utf8');
+  if (typeof body !== 'string') return false;
+  const expected = `sha256=${crypto.createHmac('sha256', TANGO_BOT_EVENTSUB_SECRET).update(`${messageId}${timestamp}${body}`).digest('hex')}`;
+  const expectedBuffer = Buffer.from(expected, 'utf8');
+  const signatureBuffer = Buffer.from(signature, 'utf8');
+  return expectedBuffer.length === signatureBuffer.length && crypto.timingSafeEqual(expectedBuffer, signatureBuffer);
+}
+
+function registerTangoBotEventSubMessage(messageId) {
+  const now = Date.now();
+  for (const [knownMessageId, receivedAt] of tangoBotEventSubMessageIds) {
+    if (now - receivedAt > TANGO_BOT_EVENTSUB_MESSAGE_TTL_MS) tangoBotEventSubMessageIds.delete(knownMessageId);
+  }
+  if (tangoBotEventSubMessageIds.has(messageId)) return false;
+  tangoBotEventSubMessageIds.set(messageId, now);
+  return true;
+}
+
+function tangoBotCommandFromMessage(message) {
+  const command = String(message || '').trim().split(/\s+/, 1)[0].toLowerCase();
+  return /^![a-z0-9_]{1,30}$/.test(command) ? command : null;
+}
+
+async function handleTangoBotChatMessage(payload) {
+  const event = payload?.event;
+  const broadcasterId = String(event?.broadcaster_user_id || '');
+  const botId = String(payload?.subscription?.condition?.user_id || '');
+  const commandName = tangoBotCommandFromMessage(event?.message?.text);
+  if (!/^\d+$/.test(broadcasterId) || !commandName || String(event?.chatter_user_id || '') === botId) return;
+
+  const commandResult = await supabaseAdmin.from('twitch_bot_commands')
+    .select('response_type, response_text')
+    .eq('broadcaster_id', broadcasterId)
+    .eq('command_name', commandName)
+    .eq('enabled', true)
+    .maybeSingle();
+  if (commandResult.error) throw new Error(commandResult.error.message);
+  if (!commandResult.data) return;
+
+  let reply = commandResult.data.response_text;
+  if (commandResult.data.response_type === 'delay') {
+    const stateResult = await supabaseAdmin.from('twitch_bot_channel_state')
+      .select('delay_seconds')
+      .eq('broadcaster_id', broadcasterId)
+      .maybeSingle();
+    if (stateResult.error) throw new Error(stateResult.error.message);
+    const delaySeconds = Number(stateResult.data?.delay_seconds || 0);
+    reply = delaySeconds === 0 ? '⏱ El stream está sin delay.' : `⏱ Delay actual: ${delaySeconds} segundos.`;
+  }
+  if (reply) await sendTangoBotChatMessage(broadcasterId, reply);
 }
 
 function twitchConfigurationError(res) {
@@ -1019,6 +1184,17 @@ app.get('/auth/twitch/bot/callback', async (req, res) => {
       return res.status(503).send('No se pudo guardar la autorización. Confirmá que la migración de Tango GG esté aplicada.');
     }
 
+    if (mode === 'channel') {
+      try {
+        await ensureTangoBotChannelDefaults(user.id);
+        await subscribeTangoBotToChannel(user.id);
+      } catch (setupError) {
+        console.error(`Tango bot channel setup failed for ${user.id}:`, setupError.message);
+      }
+    } else {
+      void subscribeTangoBotToAuthorizedChannels().catch((setupError) => console.error('Tango bot chat setup failed:', setupError.message));
+    }
+
     delete req.session.twitchBotOAuthState;
     delete req.session.twitchBotOAuthMode;
     const title = mode === 'channel' ? 'Canal autorizado' : 'Bot conectado';
@@ -1028,6 +1204,19 @@ app.get('/auth/twitch/bot/callback', async (req, res) => {
     console.error('Tango bot OAuth callback error:', error.message);
     res.status(500).send('Ocurrió un error al conectar el bot. Volvé a intentarlo.');
   }
+});
+
+app.post('/webhooks/twitch/eventsub', (req, res) => {
+  if (!isValidTangoBotEventSubRequest(req)) return res.sendStatus(403);
+
+  const messageId = req.get('Twitch-Eventsub-Message-Id');
+  const messageType = req.get('Twitch-Eventsub-Message-Type');
+  if (!registerTangoBotEventSubMessage(messageId)) return res.sendStatus(204);
+  if (messageType === 'webhook_callback_verification') return res.type('text/plain').send(req.body?.challenge || '');
+  if (messageType !== 'notification' || req.body?.subscription?.type !== 'channel.chat.message') return res.sendStatus(204);
+
+  res.sendStatus(204);
+  void handleTangoBotChatMessage(req.body).catch((error) => console.error('Tango bot chat command failed:', error.message));
 });
 
 app.get('/api/tango-bot/status', async (req, res) => {
@@ -1085,44 +1274,22 @@ app.post('/api/tango-bot/delay', async (req, res) => {
   if (Date.now() - lastAnnouncementAt < 3_000) return res.json({ ok: true, skipped: true });
 
   try {
-    const [botResult, channelResult] = await Promise.all([
-      supabaseAdmin.from('twitch_bot_installations')
-        .select('twitch_id, access_token_ciphertext, refresh_token_ciphertext, token_expires_at')
-        .eq('singleton', true)
-        .maybeSingle(),
-      supabaseAdmin.from('twitch_bot_channel_authorizations')
-        .select('broadcaster_id')
-        .eq('broadcaster_id', broadcasterId)
-        .maybeSingle()
-    ]);
-    if (botResult.error || !botResult.data) {
-      console.error('Tango bot delay status read failed:', botResult.error?.message || 'Bot no conectado.');
-      return res.status(503).json({ ok: false, message: 'No se pudo leer la conexión del bot.' });
-    }
+    const channelResult = await supabaseAdmin.from('twitch_bot_channel_authorizations')
+      .select('broadcaster_id')
+      .eq('broadcaster_id', broadcasterId)
+      .maybeSingle();
     if (channelResult.error || !channelResult.data) {
       console.error('Tango bot delay channel read failed:', channelResult.error?.message || 'Canal no autorizado.');
       return res.status(403).json({ ok: false, message: 'El bot no está autorizado para este canal.' });
     }
 
-    const accessToken = await getTangoBotAccessToken(botResult.data);
-    const twitchResponse = await fetch('https://api.twitch.tv/helix/chat/messages', {
-      method: 'POST',
-      headers: {
-        'Client-Id': TANGO_BOT_TWITCH_CLIENT_ID,
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        broadcaster_id: broadcasterId,
-        sender_id: String(botResult.data.twitch_id),
-        message: delaySeconds === 0 ? '⏱ El stream está sin delay.' : `⏱ Delay actual: ${delaySeconds} segundos.`
-      })
-    });
-    const payload = await twitchResponse.json();
-    if (!twitchResponse.ok || !payload?.data?.[0]?.is_sent) {
-      console.error('Tango bot delay chat send failed:', payload?.message || payload?.data?.[0]?.drop_reason?.message || twitchResponse.status);
-      return res.status(502).json({ ok: false, message: 'Twitch no pudo enviar el aviso del delay.' });
+    try {
+      await ensureTangoBotChannelDefaults(broadcasterId);
+      await setTangoBotChannelDelay(broadcasterId, delaySeconds);
+    } catch (stateError) {
+      console.error('Tango bot delay state write failed:', stateError.message);
     }
+    await sendTangoBotChatMessage(broadcasterId, delaySeconds === 0 ? '⏱ El stream está sin delay.' : `⏱ Delay actual: ${delaySeconds} segundos.`);
 
     tangoBotDelayAnnouncements.set(broadcasterId, Date.now());
     res.json({ ok: true });
@@ -2215,4 +2382,5 @@ server.listen(PORT, () => {
   console.log(`Tango GG server listening on http://localhost:${PORT}`);
   console.log('Editor: http://localhost:' + PORT + '/editor.html (requiere Twitch)');
   console.log('Viewer: se genera como enlace privado desde Configuración.');
+  void subscribeTangoBotToAuthorizedChannels().catch((error) => console.error('Tango bot startup subscription failed:', error.message));
 });
