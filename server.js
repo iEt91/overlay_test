@@ -426,6 +426,37 @@ function tangoBotCommandFromMessage(message) {
   return /^![a-z0-9_]{1,30}$/.test(command) ? command : null;
 }
 
+function tangoBotManagementError(message, statusCode) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+async function requireTangoBotChannelManager(req, broadcasterId) {
+  const accessToken = String(req.get('authorization') || '').match(/^Bearer\s+(.+)$/i)?.[1];
+  if (!accessToken) throw tangoBotManagementError('Iniciá sesión con Twitch para administrar los comandos.', 401);
+
+  const validationResponse = await fetch('https://id.twitch.tv/oauth2/validate', {
+    headers: { Authorization: `OAuth ${accessToken}` }
+  });
+  const validation = await validationResponse.json().catch(() => ({}));
+  if (!validationResponse.ok || !validation.user_id) {
+    throw tangoBotManagementError('Tu sesión de Twitch venció. Volvé a iniciar sesión en Companion.', 401);
+  }
+  if (String(validation.user_id) !== broadcasterId) {
+    throw tangoBotManagementError('Solo el dueño del canal puede administrar sus comandos.', 403);
+  }
+
+  const authorizationResult = await supabaseAdmin.from('twitch_bot_channel_authorizations')
+    .select('broadcaster_id')
+    .eq('broadcaster_id', broadcasterId)
+    .maybeSingle();
+  if (authorizationResult.error) throw authorizationResult.error;
+  if (!authorizationResult.data) throw tangoBotManagementError('Tango GG Bot todavía no está autorizado para este canal.', 403);
+
+  return broadcasterId;
+}
+
 async function handleTangoBotChatMessage(payload) {
   const event = payload?.event;
   const broadcasterId = String(event?.broadcaster_user_id || '');
@@ -1296,18 +1327,10 @@ app.post('/api/tango-bot/delay', async (req, res) => {
     return res.status(400).json({ ok: false, message: 'El canal o el delay no son válidos.' });
   }
 
-  const lastAnnouncementAt = tangoBotDelayAnnouncements.get(broadcasterId) || 0;
-  if (Date.now() - lastAnnouncementAt < 3_000) return res.json({ ok: true, skipped: true });
-
   try {
-    const channelResult = await supabaseAdmin.from('twitch_bot_channel_authorizations')
-      .select('broadcaster_id')
-      .eq('broadcaster_id', broadcasterId)
-      .maybeSingle();
-    if (channelResult.error || !channelResult.data) {
-      console.error('Tango bot delay channel read failed:', channelResult.error?.message || 'Canal no autorizado.');
-      return res.status(403).json({ ok: false, message: 'El bot no está autorizado para este canal.' });
-    }
+    await requireTangoBotChannelManager(req, broadcasterId);
+    const lastAnnouncementAt = tangoBotDelayAnnouncements.get(broadcasterId) || 0;
+    if (Date.now() - lastAnnouncementAt < 3_000) return res.json({ ok: true, skipped: true });
 
     try {
       await ensureTangoBotChannelDefaults(broadcasterId);
@@ -1322,6 +1345,72 @@ app.post('/api/tango-bot/delay', async (req, res) => {
   } catch (error) {
     console.error('Tango bot delay announcement failed:', error.message);
     res.status(503).json({ ok: false, message: 'No se pudo anunciar el delay con el bot.' });
+  }
+});
+
+app.get('/api/tango-bot/commands', async (req, res) => {
+  const broadcasterId = String(req.query.channelId || '').trim();
+  if (!/^\d+$/.test(broadcasterId)) return res.status(400).json({ ok: false, message: 'No se pudo identificar el canal.' });
+
+  try {
+    await requireTangoBotChannelManager(req, broadcasterId);
+    await ensureTangoBotChannelDefaults(broadcasterId);
+    const result = await supabaseAdmin.from('twitch_bot_commands')
+      .select('command_name, response_type, response_text, enabled, updated_at')
+      .eq('broadcaster_id', broadcasterId)
+      .order('command_name');
+    if (result.error) throw result.error;
+    return res.json({ ok: true, commands: result.data || [] });
+  } catch (error) {
+    return res.status(error.statusCode || 503).json({ ok: false, message: error.message || 'No se pudieron leer los comandos.' });
+  }
+});
+
+app.post('/api/tango-bot/commands', async (req, res) => {
+  const broadcasterId = String(req.body?.channelId || '').trim();
+  const commandName = String(req.body?.commandName || '').trim().toLowerCase();
+  const responseText = String(req.body?.responseText || '').trim();
+  const enabled = req.body?.enabled !== false;
+  if (!/^\d+$/.test(broadcasterId) || !/^![a-z0-9_]{1,30}$/.test(commandName)) {
+    return res.status(400).json({ ok: false, message: 'El nombre del comando no es válido.' });
+  }
+  if (commandName === '!delay') return res.status(400).json({ ok: false, message: '!delay es un comando del sistema y no se puede editar.' });
+  if (!responseText || responseText.length > 500) return res.status(400).json({ ok: false, message: 'La respuesta debe tener entre 1 y 500 caracteres.' });
+
+  try {
+    await requireTangoBotChannelManager(req, broadcasterId);
+    const result = await supabaseAdmin.from('twitch_bot_commands').upsert({
+      broadcaster_id: broadcasterId,
+      command_name: commandName,
+      response_type: 'static',
+      response_text: responseText,
+      enabled
+    }, { onConflict: 'broadcaster_id,command_name' });
+    if (result.error) throw result.error;
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(error.statusCode || 503).json({ ok: false, message: error.message || 'No se pudo guardar el comando.' });
+  }
+});
+
+app.delete('/api/tango-bot/commands', async (req, res) => {
+  const broadcasterId = String(req.body?.channelId || '').trim();
+  const commandName = String(req.body?.commandName || '').trim().toLowerCase();
+  if (!/^\d+$/.test(broadcasterId) || !/^![a-z0-9_]{1,30}$/.test(commandName)) {
+    return res.status(400).json({ ok: false, message: 'El nombre del comando no es válido.' });
+  }
+  if (commandName === '!delay') return res.status(400).json({ ok: false, message: '!delay es un comando del sistema y no se puede eliminar.' });
+
+  try {
+    await requireTangoBotChannelManager(req, broadcasterId);
+    const result = await supabaseAdmin.from('twitch_bot_commands')
+      .delete()
+      .eq('broadcaster_id', broadcasterId)
+      .eq('command_name', commandName);
+    if (result.error) throw result.error;
+    return res.json({ ok: true });
+  } catch (error) {
+    return res.status(error.statusCode || 503).json({ ok: false, message: error.message || 'No se pudo eliminar el comando.' });
   }
 });
 
