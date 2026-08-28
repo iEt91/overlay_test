@@ -31,6 +31,11 @@ let tangoBotAppAccessToken = null;
 let tangoBotAppAccessTokenExpiresAt = 0;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
+// Esta configuración es pública: permite que Tango Delay inicie OAuth sin
+// distribuir archivos .env a los testers. Nunca incluye secretos de Twitch ni
+// la service role key de Supabase.
+const TANGO_DELAY_SUPABASE_PUBLISHABLE_KEY = process.env.TANGO_DELAY_SUPABASE_PUBLISHABLE_KEY || process.env.TANGO_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_PUBLISHABLE_KEY;
+const TANGO_DELAY_TWITCH_CLIENT_ID = process.env.TANGO_DELAY_TWITCH_CLIENT_ID || process.env.TANGO_TWITCH_CLIENT_ID || TWITCH_CLIENT_ID;
 const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET?.trim();
 // Durante la beta el acceso no vence automáticamente. Cuando haya planes pagos,
 // se activa explícitamente en el host con ENFORCE_SUBSCRIPTIONS=true.
@@ -190,6 +195,19 @@ app.set('trust proxy', 1);
 // Render consulta esta ruta para confirmar que el proceso Node sigue vivo.
 // No expone datos de usuarios ni requiere sesión.
 app.get('/health', (_req, res) => res.status(200).json({ ok: true }));
+
+app.get('/api/tango-delay/bootstrap', (_req, res) => {
+  const configured = Boolean(SUPABASE_URL && TANGO_DELAY_SUPABASE_PUBLISHABLE_KEY && TANGO_DELAY_TWITCH_CLIENT_ID);
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json(configured
+    ? {
+      configured: true,
+      supabaseUrl: SUPABASE_URL,
+      supabasePublishableKey: TANGO_DELAY_SUPABASE_PUBLISHABLE_KEY,
+      twitchClientId: TANGO_DELAY_TWITCH_CLIENT_ID
+    }
+    : { configured: false, message: 'Tango Delay todavía no está configurado en el servidor.' });
+});
 
 const sessionMiddleware = session({
   name: 'tango.sid',
