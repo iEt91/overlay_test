@@ -34,6 +34,7 @@ const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 // Esta configuración es pública: permite que Tango Delay inicie OAuth sin
 // distribuir archivos .env a los testers. Nunca incluye secretos de Twitch ni
 // la service role key de Supabase.
+const TANGO_DELAY_SUPABASE_URL = process.env.TANGO_DELAY_SUPABASE_URL || process.env.TANGO_SUPABASE_URL || SUPABASE_URL;
 const TANGO_DELAY_SUPABASE_PUBLISHABLE_KEY = process.env.TANGO_DELAY_SUPABASE_PUBLISHABLE_KEY || process.env.TANGO_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_PUBLISHABLE_KEY;
 const TANGO_DELAY_TWITCH_CLIENT_ID = process.env.TANGO_DELAY_TWITCH_CLIENT_ID || process.env.TANGO_TWITCH_CLIENT_ID || TWITCH_CLIENT_ID;
 const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET?.trim();
@@ -197,12 +198,12 @@ app.set('trust proxy', 1);
 app.get('/health', (_req, res) => res.status(200).json({ ok: true }));
 
 app.get('/api/tango-delay/bootstrap', (_req, res) => {
-  const configured = Boolean(SUPABASE_URL && TANGO_DELAY_SUPABASE_PUBLISHABLE_KEY && TANGO_DELAY_TWITCH_CLIENT_ID);
+  const configured = Boolean(TANGO_DELAY_SUPABASE_URL && TANGO_DELAY_SUPABASE_PUBLISHABLE_KEY && TANGO_DELAY_TWITCH_CLIENT_ID);
   res.set('Cache-Control', 'public, max-age=300');
   res.json(configured
     ? {
       configured: true,
-      supabaseUrl: SUPABASE_URL,
+      supabaseUrl: TANGO_DELAY_SUPABASE_URL,
       supabasePublishableKey: TANGO_DELAY_SUPABASE_PUBLISHABLE_KEY,
       twitchClientId: TANGO_DELAY_TWITCH_CLIENT_ID
     }
